@@ -1,0 +1,17 @@
+{
+  "name": "@odm/core",
+  "version": "1.0.0",
+  "description": "Clean-room segmented download engine: resume, ranges, shaping, media grabbing.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

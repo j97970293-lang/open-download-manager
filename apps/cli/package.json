@@ -1,0 +1,19 @@
+{
+  "name": "@odm/cli",
+  "version": "1.0.0",
+  "description": "Command line interface for Open Download Manager.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "odm": "./bin/odm.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@odm/core": "*"
+  }
+}

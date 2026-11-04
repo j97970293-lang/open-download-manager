@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Engine tests
+        run: npm test
+      - name: End-to-end smoke
+        run: npm run smoke
+      - name: Syntax check
+        run: |
+          node --check apps/server/src/server.js
+          node --check apps/server/src/mcp.js
+          node --check apps/cli/bin/odm.js
+          node --check apps/web/public/app.js

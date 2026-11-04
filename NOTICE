@@ -1,0 +1,24 @@
+Open Download Manager
+Copyright (c) 2026 Open Download Manager contributors — MIT
+
+This product is an independent, clean-room implementation of public protocols.
+It contains no code, resources or assets from any commercial download manager.
+
+Protocols implemented from their public specifications:
+  · HTTP Range requests / resumption — RFC 9110, RFC 9111
+  · Content-Disposition filenames — RFC 6266, RFC 5987
+  · HTTP Live Streaming — RFC 8216
+  · MPEG-DASH — ISO/IEC 23009-1
+  · Model Context Protocol — public MCP spec (JSON-RPC 2.0)
+
+Runtime: Node.js built-ins only (>= 20.11). No third-party packages are
+required at runtime; the test-suite uses node:test (stdlib).
+
+Trademarks: "Internet Download Manager", "IDM", "1DM+" and all other product
+names belong to their owners and are used descriptively only. This project is
+not affiliated with, endorsed by, or sponsored by any of them.
+
+Reference analysis: the feature checklist in docs/PARITY.md was derived from
+static inspection of an APK's public AndroidManifest.xml (package, version,
+permissions, components, intent filters). No decompilation, resource extraction
+or traffic capture was performed.

@@ -1,0 +1,19 @@
+[Unit]
+Description=Open Download Manager (API + dashboard + queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Environment=PORT=8420
+Environment=ODM_HOME=%h/.odm
+Environment=ODM_DOWNLOAD_DIR=%h/Downloads
+ExecStart=/usr/bin/node /opt/open-download-manager/apps/server/src/server.js
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+{
+  "name": "@odm/server",
+  "version": "1.0.0",
+  "description": "REST + SSE API, web dashboard and MCP server for Open Download Manager.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./src/server.js",
+  "exports": {
+    ".": "./src/server.js",
+    "./mcp": "./src/mcp.js"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@odm/core": "*"
+  }
+}

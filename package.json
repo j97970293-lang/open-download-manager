@@ -1,0 +1,40 @@
+{
+  "name": "open-download-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Clean-room, MIT-licensed reimplementation of a segmented download manager: resume, bandwidth shaping, media grabbing, MCP + web UI.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "workspaces": [
+    "packages/core",
+    "apps/cli",
+    "apps/server"
+  ],
+  "scripts": {
+    "start": "node apps/server/src/server.js",
+    "dashboard": "node apps/server/src/server.js",
+    "test": "node --test packages/core/test/",
+    "test:watch": "node --test --watch packages/core/test/",
+    "demo": "node scripts/demo.js",
+    "smoke": "node scripts/smoke.js",
+    "mcp": "node apps/server/src/mcp.js"
+  },
+  "keywords": [
+    "download-manager",
+    "segmented-download",
+    "resume",
+    "aria2",
+    "idm",
+    "clean-room",
+    "mcp",
+    "hls",
+    "dash"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/j97970293-lang/open-download-manager"
+  }
+}
