@@ -108,6 +108,23 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       });
     }
 
+    const createStream = ({ url, dir, connections, filename, maxHeight, limit }) => {
+      const job = new ManifestDownload({
+        url,
+        dir,
+        filename,
+        maxHeight: maxHeight || Infinity,
+        parallel: Number(connections ?? 3),
+        limit: limit || 0,
+      });
+      manifestJobs.set(job.id, job);
+      job.on('progress', (snap) => broadcast('progress', snap));
+      job.on('status', (status, snap) => broadcast('status', { status, ...snap }));
+      job.on('done', (snap) => broadcast('done', snap));
+      job.on('failed', (err, snap) => broadcast('failed', { ...snap, error: err }));
+      return job;
+    };
+
     if (path === '/api/downloads' && method === 'POST') {
       const body = await readBody(req);
       const urls = Array.isArray(body.urls) ? body.urls : body.url ? [body.url] : [];
@@ -115,19 +132,15 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       const created = [];
       const streams = [];
       for (const u of urls) {
-        if (body.kind === 'hls' || /\.m3u8(\?|$)/i.test(u)) {
-          const job = new ManifestDownload({
+        if (body.kind === 'hls' || /\.m3u8(\?|$)/i.test(u) || /\.mpd(\?|$)/i.test(u)) {
+          const job = createStream({
             url: u,
             dir: body.dir || downloadDir,
-            maxHeight: body.maxHeight || Infinity,
-            parallel: Number(body.connections ?? 3),
+            filename: body.filename,
+            maxHeight: body.maxHeight,
+            connections: body.connections,
             limit: body.limit ? parseSize(body.limit) : 0,
           });
-          manifestJobs.set(job.id, job);
-          job.on('progress', (snap) => broadcast('progress', snap));
-          job.on('status', (status, snap) => broadcast('status', { status, ...snap }));
-          job.on('done', (snap) => broadcast('done', snap));
-          job.on('failed', (err, snap) => broadcast('failed', { ...snap, error: err }));
           streams.push(job);
           created.push(job.snapshot());
           continue;
@@ -371,24 +384,73 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       return setTimeout(() => res.end(part), 40);
     }
 
+    // ---- DASH ladder (SegmentTemplate + SegmentTimeline, the on-demand form) ----
+    if (process.env.ODM_DEMO === '1' && path === '/demo/manifest.mpd') {
+      const mpd =
+        '<?xml version="1.0" encoding="utf-8"?>\n' +
+        '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT48S" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">\n' +
+        '  <Period duration="PT48S">\n' +
+        '    <AdaptationSet mimeType="video/mp4" contentType="video" segmentAlignment="true" startWithSAP="1">\n' +
+        '      <SegmentTemplate timescale="1" initialization="/demo/dash/init-$RepresentationID$.m4s" media="/demo/dash/$RepresentationID$-$Number%02d$.m4s" startNumber="1">\n' +
+        '        <SegmentTimeline><S t="0" d="4" r="11"/></SegmentTimeline>\n' +
+        '      </SegmentTemplate>\n' +
+        '      <Representation id="v360" bandwidth="800000" width="640" height="360" codecs="avc1.42E01E"/>\n' +
+        '      <Representation id="v720" bandwidth="2400000" width="1280" height="720" codecs="avc1.4D401F"/>\n' +
+        '      <Representation id="v1080" bandwidth="4800000" width="1920" height="1080" codecs="avc1.640028"/>\n' +
+        '    </AdaptationSet>\n' +
+        '    <AdaptationSet mimeType="audio/mp4" contentType="audio" lang="en">\n' +
+        '      <SegmentTemplate timescale="1" initialization="/demo/dash/init-$RepresentationID$.m4s" media="/demo/dash/$RepresentationID$-$Number%02d$.m4s" startNumber="1">\n' +
+        '        <SegmentTimeline><S t="0" d="4" r="11"/></SegmentTimeline>\n' +
+        '      </SegmentTemplate>\n' +
+        '      <Representation id="a128" bandwidth="128000" codecs="mp4a.40.2"/>\n' +
+        '    </AdaptationSet>\n' +
+        '  </Period>\n' +
+        '</MPD>\n';
+      res.writeHead(200, { 'content-type': 'application/dash+xml' });
+      return res.end(mpd);
+    }
+
+    if (process.env.ODM_DEMO === '1' && /^\/demo\/dash\/(init-)?[va]\d+(-\d+)?\.m4s$/.test(path)) {
+      const isInit = path.includes('init-');
+      const bytes = isInit ? 1 * 1024 : 240 * 1024;
+      const part = Buffer.alloc(bytes, path.charCodeAt(path.length - 6) + path.length);
+      res.writeHead(200, { 'content-type': 'video/iso.segment', 'content-length': part.length });
+      if (req.method === 'HEAD') return res.end();
+      return setTimeout(() => res.end(part), 25);
+    }
+
     if (process.env.ODM_DEMO === '1' && path === '/demo/seed' && method === 'POST') {
+      // Idempotent: clicking "demo" twice must not clone the whole dashboard. Jobs
+      // that already exist for a URL are skipped instead.
+      const known = new Set([
+        ...[...store.tasks.values()].map((t) => t.url),
+        ...[...manifestJobs.values()].map((m) => m.url),
+      ]);
       const plan = [
         { url: `${originOf(req)}/demo/file?mb=160&delay=45&name=ubuntu-demo.iso`, connections: 8 },
         { url: `${originOf(req)}/demo/file?mb=90&delay=40&name=photo-archive.zip`, connections: 6 },
         { url: `${originOf(req)}/demo/file?mb=40&delay=22&name=product-tour-1080p.mp4`, connections: 4 },
         { url: `${originOf(req)}/demo/file?mb=6&delay=40&name=changelog.json`, connections: 2 },
+        { url: `${originOf(req)}/demo/master.m3u8`, connections: 3, manifest: true, filename: 'demo-hls-1080p.ts' },
+        { url: `${originOf(req)}/demo/manifest.mpd`, connections: 3, manifest: true, filename: 'demo-dash-1080p.mp4' },
       ];
       const seeded = [];
+      const skipped = [];
       for (const item of plan) {
-        const t = store.add({ url: item.url, dir: downloadDir, connections: item.connections, referer: `${originOf(req)}/demo/page` });
-        t.on('progress', (snap) => broadcast('progress', snap));
-        t.on('status', (status, snap) => broadcast('status', { status, ...snap }));
-        t.on('done', (snap) => { broadcast('done', snap); queue.tick(); });
-        t.on('failed', (err, snap) => broadcast('failed', { ...snap, error: err }));
+        if (known.has(item.url)) {
+          skipped.push(item.url);
+          continue;
+        }
+        // A manifest goes through ManifestDownload, not the byte-range engine:
+        // otherwise the .m3u8/.mpd is saved as a text file.
+        const t = item.manifest
+          ? createStream({ url: item.url, dir: downloadDir, connections: item.connections, filename: item.filename })
+          : store.add({ url: item.url, dir: downloadDir, connections: item.connections, referer: `${originOf(req)}/demo/page` });
+        if (item.manifest) t.start().catch(() => {});
         seeded.push(t.snapshot().id);
       }
       queue.tick();
-      return json(res, 201, { seeded });
+      return json(res, 201, { seeded, skipped });
     }
 
     // ---- static dashboard ----

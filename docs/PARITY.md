@@ -54,7 +54,7 @@ That filter list is the clearest public statement of the product's **domain**: H
 | --- | --- |
 | Direct HTTP(S) file | ✅ `odm add` / `POST /api/downloads` |
 | HLS (`m3u8`, incl. `x-mpegurl` variants) | ✅ master + media playlist parsing, variant ranking |
-| DASH (`mpd`, incl. `3gpp.mpd`, `audio/vnd.mpeg.dash.mpd`) | ✅ MPD parsing, representation ranking |
+| DASH (`mpd`, incl. `3gpp.mpd`, `audio/vnd.mpeg.dash.mpd`) | ✅ full support: MPD parsing, representation ranking **and** segment expansion (SegmentTemplate `$Number$`/`$Time$`, SegmentTimeline with `@r`, SegmentList, BaseURL) concatenated into one file — `src/dash.js` |
 | In-page media (`video`, `audio`, `og:video`) | ✅ `odm grab` / `POST /api/grab` |
 | `file://`, `content://` | ➖ meaningless outside Android |
 | `magnet:` / BitTorrent | ❌ not implemented (separate protocol stack) |
@@ -98,11 +98,11 @@ Legend: ✅ implemented · ⚠️ partial / different mechanism · ❌ intention
 | --- | --- | --- | --- |
 | In-page video/audio detection | ✅ | ✅ | `<video>`, `<source>`, `og:video`, inline JS URLs |
 | HLS parsing + quality choice | ✅ | ✅ | master/media playlists, `RESOLUTION`, `BANDWIDTH` |
-| DASH parsing + quality choice | ✅ | ✅ | `AdaptationSet`/`Representation`, `BaseURL` |
+| DASH parsing + quality choice | ✅ | ✅ | `AdaptationSet`/`Representation`, `BaseURL`, per-adaptation-set selection (`content: video\|audio`) |
 | Live stream detection | ✅ | ✅ | `#EXT-X-ENDLIST` absence |
 | Encrypted playlist refusal | ✅ | ✅ | `#EXT-X-KEY:METHOD` → error, never bypassed |
 | Encrypted / DRM detection | ✅ | ✅ detect-and-refuse | no circumvention, ever |
-| Segment remux to a single file | ✅ | ✅ | HLS: segments concatenated in order into one `.ts`/fMP4 file with per-segment resume (`ManifestDownload`); DASH: variants listed and fetched as direct streams |
+| Segment remux to a single file | ✅ | ✅ | HLS **and** DASH: segments concatenated in order into one `.ts`/fMP4/`.mp4` file with per-segment resume (`ManifestDownload`); the init segment is written exactly once (regression test asserts the output is byte-for-byte the sum of its parts) |
 | BitTorrent / magnet | ✅ | ❌ | separate protocol stack |
 
 ### Platform

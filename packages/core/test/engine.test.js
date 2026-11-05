@@ -28,6 +28,7 @@ import {
   MANIFEST_STATUS,
   withDiskTimeout,
 } from '../src/index.js';
+import { planDash, expandTimeline } from '../src/dash.js';
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const tmp = () => mkdtemp(join(tmpdir(), 'odm-'));
@@ -463,4 +464,96 @@ test('a filesystem call that never answers is abandoned, not awaited forever', a
     (err) => err.code === 'DISK_ERROR' && /timed out/.test(err.message),
   );
   assert.ok(Date.now() - started < 2_000, `should give up quickly, took ${Date.now() - started}ms`);
+});
+
+
+// ---------------------------------------------------------------- DASH (audit gap)
+
+const MPD = `<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" mediaPresentationDuration="PT6S">
+  <Period duration="PT6S">
+    <AdaptationSet mimeType="video/mp4" contentType="video">
+      <SegmentTemplate timescale="1" duration="2" startNumber="1"
+        initialization="init-$RepresentationID$.mp4" media="seg-$RepresentationID$-$Number%03d$.m4s"/>
+      <Representation id="lo" bandwidth="800000" width="640" height="360"/>
+      <Representation id="hi" bandwidth="2400000" width="1280" height="720"/>
+    </AdaptationSet>
+    <AdaptationSet mimeType="audio/mp4" contentType="audio">
+      <SegmentTemplate timescale="1000" initialization="init-$RepresentationID$.mp4" media="aud-$Time$.m4s">
+        <SegmentTimeline><S t="0" d="2000" r="2"/></SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="a0" bandwidth="128000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>`;
+
+test('DASH: numbered template expands with zero padding and honours maxHeight', () => {
+  const plan = planDash(MPD, 'https://cdn.test/v/movie.mpd', { maxHeight: 480 });
+  assert.equal(plan.representation.id, 'lo');
+  assert.deepEqual(
+    plan.segments.map((s) => s.url),
+    ['seg-lo-001.m4s', 'seg-lo-002.m4s', 'seg-lo-003.m4s'].map((p) => `https://cdn.test/v/${p}`),
+  );
+  assert.equal(plan.init, 'https://cdn.test/v/init-lo.mp4');
+});
+
+test('DASH: $Time$ templates follow SegmentTimeline repeats', () => {
+  const plan = planDash(MPD, 'https://cdn.test/v/movie.mpd', { content: 'audio' });
+  assert.deepEqual(
+    plan.segments.map((s) => s.url),
+    ['aud-0.m4s', 'aud-2000.m4s', 'aud-4000.m4s'].map((p) => `https://cdn.test/v/${p}`),
+  );
+  assert.equal(expandTimeline('<S t="0" d="1000" r="-1"/>', 3.5).length, 4, 'r=-1 repeats to the period end');
+});
+
+test('DASH: the initialization segment is written once, so the file is exactly the sum of parts', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({
+    routes: {
+      '/demo.mpd': {
+        body: '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet mimeType="video/mp4">'
+          + '<SegmentTemplate duration="2" timescale="1" startNumber="1" initialization="init.m4s" media="p-$Number$.m4s"/>'
+          + '<Representation id="v" bandwidth="1"/></AdaptationSet></Period></MPD>',
+        type: 'application/dash+xml',
+      },
+      '/init.m4s': { body: 'I'.repeat(100), type: 'video/iso.segment' },
+      '/p-1.m4s': { body: 'A'.repeat(200), type: 'video/iso.segment' },
+      '/p-2.m4s': { body: 'B'.repeat(200), type: 'video/iso.segment' },
+    },
+  });
+  try {
+    const task = new ManifestDownload({ url: srv.url('/demo.mpd'), dir });
+    const snap = await task.start();
+    assert.equal(snap.status, MANIFEST_STATUS.COMPLETE, JSON.stringify(snap.error));
+    const bytes = await readFile(join(dir, 'demo.mp4'));
+    assert.equal(bytes.length, 500, 'init once + two fragments, no duplication');
+    assert.equal(bytes.toString(), 'I'.repeat(100) + 'A'.repeat(200) + 'B'.repeat(200));
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('DASH: a DRM-protected manifest is refused, not downloaded', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({
+    routes: {
+      '/drm.mpd': {
+        body: '<MPD mediaPresentationDuration="PT4S"><Period><AdaptationSet mimeType="video/mp4">'
+          + '<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection" value="cenc"/>'
+          + '<SegmentTemplate duration="2" timescale="1" media="x-$Number$.m4s"/>'
+          + '<Representation id="v" bandwidth="1"/></AdaptationSet></Period></MPD>',
+        type: 'application/dash+xml',
+      },
+    },
+  });
+  try {
+    const task = new ManifestDownload({ url: srv.url('/drm.mpd'), dir });
+    const snap = await task.start();
+    assert.equal(snap.status, MANIFEST_STATUS.ERROR);
+    assert.match(snap.error.message, /DRM/i);
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
 });

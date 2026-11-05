@@ -61,6 +61,11 @@ export function extractMediaFromHtml(html, pageUrl) {
     const type = /\btype\s*=\s*["']([^"']+)["']/i.exec(tag);
     if (src) push(src[1], { source: 'source', mime: type?.[1] });
   }
+  // <video> is often a shell for a manifest handed to a JS player.
+  for (const m of html.matchAll(/<video\b[^>]*>/gi)) {
+    const src = /\bsrc\s*=\s*["']([^"']+\.(?:m3u8|mpd)[^"']*)["']/i.exec(m[0]);
+    if (src) push(src[1], { source: 'video-manifest' });
+  }
   for (const m of html.matchAll(/<audio\b[^>]*>/gi)) {
     const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(m[0]);
     if (src) push(src[1], { source: 'audio' });
@@ -183,7 +188,7 @@ export async function resolveManifest(url, { headers, signal } = {}) {
     return { kind: 'hls', ...parseM3u8(text, finalUrl), manifestUrl: finalUrl };
   }
   if (/\.mpd(\?|$)/i.test(finalUrl) || /<MPD\b/i.test(text)) {
-    return { kind: 'dash', ...parseMpd(text, finalUrl), manifestUrl: finalUrl };
+    return { kind: 'dash', ...parseMpd(text, finalUrl), text, manifestUrl: finalUrl };
   }
   throw new Error('Not a recognised HLS/DASH manifest');
 }

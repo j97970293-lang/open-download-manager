@@ -148,10 +148,37 @@ export class ManifestDownload extends EventEmitter {
     if (this.speedWindow.length > 12) this.speedWindow.shift();
   }
 
-  /** Resolve the playlist: master → best variant → media segment list. */
+  /** Resolve the playlist: master → best variant → media segment list (HLS or DASH). */
   async #resolveManifest(signal) {
     const first = await resolveManifest(this.url, { headers: this.headers, signal });
     let manifest = first;
+    if (first.kind === 'dash') {
+      if (first.drm) {
+        throw new NetworkError('DRM-protected DASH manifest — refusing to download protected content');
+      }
+      const { planDash } = await import('./dash.js');
+      const plan = planDash(first.text, first.manifestUrl || this.url, {
+        maxHeight: this.maxHeight,
+        prefer: this.prefer,
+      });
+      this.playlistUrl = first.manifestUrl || this.url;
+      this.manifest = { kind: 'dash', ...plan };
+      this.segments = plan.segments.map((s, i) => ({ index: i, url: s.url, init: s.init || null }));
+      if (!this.filename) {
+        const base = (() => {
+          try {
+            const last = new URL(this.playlistUrl).pathname.split('/').filter(Boolean).pop() || 'stream';
+            return last.replace(/\.mpd$/i, '') || 'stream';
+          } catch {
+            return 'stream';
+          }
+        })();
+        const ext = /\.ts(\?|$)/i.test(this.segments[0]?.url || '') ? 'ts' : 'mp4';
+        this.filename = `${base}.${ext}`;
+        this.path = join(this.dir, this.filename);
+      }
+      return this.manifest;
+    }
     if (first.kind === 'hls' && first.type === 'master') {
       const { pickVariant } = await import('./media.js');
       const variant = pickVariant(first.variants, { maxHeight: this.maxHeight, prefer: this.prefer });
@@ -283,7 +310,10 @@ export class ManifestDownload extends EventEmitter {
 
   async #fetchSegment(seg, signal) {
     const headers = { ...this.headers };
-    const chain = seg.init ? [seg.init, seg.url] : [seg.url];
+    // An initialization segment belongs exactly ONCE, at the head of the file —
+    // repeating it before every fragment makes the output larger than the sum of
+    // its parts (and unplayable). Only segment 0 carries it.
+    const chain = seg.init && seg.index === 0 ? [seg.init, seg.url] : [seg.url];
     const parts = [];
     for (const url of chain) {
       const buf = await fetchWithRetry(url, { headers, signal, retries: 4 });

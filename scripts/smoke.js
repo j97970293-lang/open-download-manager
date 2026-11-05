@@ -168,6 +168,18 @@ console.log('\n5. HLS concatenation (CLI)');
   }
 }
 
+console.log('\n6. DASH concatenation (CLI)');
+{
+  const dashDir = join(home, 'dash');
+  await mkdir(dashDir, { recursive: true });
+  const res = await run(process.execPath, [CLI, 'hls', srv.url('/manifest.mpd'), '-d', dashDir, '--max-height', '720', '-q'], { env }).catch((e) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+  if (res.stderr) console.log('   stderr:', res.stderr.trim());
+  res.stdout.includes('segments') ? ok(`odm hls handled a DASH manifest: ${res.stdout.trim()}`) : bad(`odm hls DASH output: ${res.stdout}`);
+  const { readdir } = await import('node:fs/promises');
+  const files = await readdir(dashDir);
+  files.some((f) => f.endsWith('.mp4')) ? ok(`DASH representation saved as ${files.find((f) => f.endsWith('.mp4'))}`) : bad(`no DASH output: ${files}`);
+}
+
 await srv.close();
 await rm(home, { recursive: true, force: true });
 console.log(process.exitCode ? '\n\x1b[31mSMOKE FAILED\x1b[0m\n' : '\n\x1b[32mSMOKE PASSED\x1b[0m\n');

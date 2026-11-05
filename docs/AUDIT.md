@@ -74,6 +74,37 @@ indistinguishable from a very slow transfer.
 Tests: *"a destination that cannot hold files fails fast with DISK_ERROR"* and
 *"a filesystem call that never answers is abandoned, not awaited forever"*.
 
+## Missing features the same graphs pointed at
+
+REA's unknowns and Craft Anything's module map both flagged the manifest path as the
+weakest part of the codebase (`promise-ownership` and `request` unknown families sat on
+`manifest-download.js`). Comparing that against the reference product's declared MIME
+filters — `application/dash+xml`, `video/vnd.mpeg.dash.mpd`, `audio/vnd.mpeg.dash.mpd`,
+`video/vnd.3gpp.mpd` — exposed a real gap: **DASH was detected, listed, and never
+downloadable**. `parseMpd()` stopped at `<Representation>`; nothing expanded a
+`<SegmentTemplate>`.
+
+That is now closed by `packages/core/src/dash.js`:
+
+| MPD feature | Support |
+| --- | --- |
+| `SegmentTemplate` + `$Number$` (zero-padded via `%0Nd`) | ✅ |
+| `SegmentTemplate` + `$Time$` | ✅ |
+| `$RepresentationID$`, `$Bandwidth$` substitution | ✅ |
+| `<SegmentTimeline>` with `@t`, `@d`, `@r` (including `r="-1"`) | ✅ |
+| `<SegmentList>` / `<Initialization sourceURL>` | ✅ |
+| `<BaseURL>` chains (MPD → Period → Set → Rep → manifest URL) | ✅ |
+| `mediaPresentationDuration` / `Period@duration` ISO-8601 | ✅ |
+| `<ContentProtection>` | refused with a clear error, never downloaded |
+| Multi-period, subtitle/text adaptation sets, live MPD (`type="dynamic")` | ❌ out of scope (documented) |
+
+Three tests and one smoke section cover it, and the demo server now serves a real DASH
+ladder (`/demo/manifest.mpd` → `/demo/dash/{init-}v{360,720,1080}-NN.m4s`).
+
+A second bug surfaced while testing: the initialization segment was prepended to **every**
+fragment, so a 12-segment stream came out 12 KB too large. The fix (write it only for
+segment 0) is asserted by comparing the output length to the exact sum of the parts.
+
 ## Also cleaned up
 
 - Three exports were dead code (`headSize`, `formatStamp`, `guessNameFromUrl`); two were

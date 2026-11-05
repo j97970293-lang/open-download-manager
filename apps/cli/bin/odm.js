@@ -263,14 +263,25 @@ async function cmdManifest(args, values) {
     }
     const chosen = pickVariant(manifest.variants, { maxHeight: Number(values.maxHeight || Infinity) });
     if (values.download && chosen) return cmdHls([chosen.url], values);
+    if (values.download && chosen) return cmdHls([chosen.url], values);
   } else {
     console.log(bold(`DASH`) + (manifest.drm ? red(' (protected content — not supported)') : ''));
+    if (!manifest.drm) {
+      try {
+        const { planDash } = await import('../../../packages/core/src/dash.js');
+        const plan = planDash(manifest.text, manifest.manifestUrl, { maxHeight: Number(values.maxHeight || Infinity) });
+        console.log(dim(`  plan: ${plan.segments.length} segments · ${plan.duration}s · ${plan.representation.height || '?'}p`) + (plan.init ? dim(' · init segment') : ''));
+      } catch (err) {
+        console.log(red(`  plan failed: ${err.message}`));
+      }
+    }
     for (const set of manifest.sets) {
       console.log(`  ${set.mimeType || set.contentType || '?'} ${set.lang || ''}`);
       for (const r of set.representations) {
         console.log(`    ${cyan(r.height ? `${r.width}x${r.height}` : '?')} ${formatBytes(r.bandwidth)}/s ${dim(r.id || '')} ${r.url || dim('(segment template)')}`);
       }
     }
+    if (values.download && !manifest.drm) return cmdHls([url], values);
   }
   return 0;
 }

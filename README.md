@@ -11,7 +11,7 @@
 <p align="center">
   <img alt="Node 20+" src="https://img.shields.io/badge/node-%E2%89%A520.11-339933?style=flat-square&logo=nodedotjs&logoColor=white">
   <img alt="Zero runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-4ade80?style=flat-square">
-  <img alt="Tests: 22 passing" src="https://img.shields.io/badge/tests-22%20passing-4ade80?style=flat-square">
+  <img alt="Tests: 26 passing" src="https://img.shields.io/badge/tests-26%20passing-4ade80?style=flat-square">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f4c430?style=flat-square">
   <img alt="Status" src="https://img.shields.io/badge/status-working%20prototype-d69e2e?style=flat-square">
 </p>
@@ -43,7 +43,7 @@ This project reimplements those ideas from the specifications, not from anyone's
 git clone https://github.com/j97970293-lang/open-download-manager
 cd open-download-manager
 
-npm test          # 22 engine tests (no network needed)
+npm test          # 26 engine tests (no network needed)
 npm run smoke     # end-to-end: CLI + REST + SSE + MCP against a local server
 npm start         # API + dashboard → http://localhost:8420
 ```
@@ -71,9 +71,10 @@ node apps/cli/bin/odm.js serve --port 8420
 | **Integrity** | `sha256` / `sha1` / `md5` / `sha512` verification after transfer; magic-byte sniffing for MIME/filename correction |
 | **Queue** | Priority bands, FIFO inside a band, global concurrency cap, pause-all |
 | **Scheduling** | Daily `HH:MM-HH:MM` windows (crossing midnight supported) for off-peak runs |
-| **Media grabber** | HTML scan (`<video>`, `<source>`, `og:video`, links, inline scripts) + HLS master playlists + DASH MPD variant ranking |
+| **Media grabber** | HTML scan (`<video>`, `<source>`, `og:video`, links, inline scripts) → HLS **and** DASH manifests are recognised and offered |
 | **HLS concatenation** | Media playlist → **one file**, segments written in order with per-segment resume; master playlists pick the best variant; encrypted playlists refused |
-| **Agent access** | MCP server (stdio JSON-RPC 2.0) exposing 7 tools, 2 resources and 1 prompt |
+| **DASH concatenation** | SegmentTemplate (`$Number$`, `$Time$`), SegmentTimeline (`@r`), SegmentList and BaseURL chains expanded to an ordered segment list → **one file**; init segment written exactly once; DRM refused |
+| **Agent access** | MCP server (stdio JSON-RPC 2.0) exposing 8 tools, 2 resources and 1 prompt |
 | **UI** | Server-rendered shell + SSE live stream, one card per transfer with per-connection segments |
 
 ## Architecture

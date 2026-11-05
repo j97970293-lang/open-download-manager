@@ -33,6 +33,7 @@ export async function startTestServer(options = {}) {
     flaky = 0, // number of connections to abort mid-stream
     auth = null, // "user:pass"
     filename = 'payload.bin',
+    routes = {}, // extra exact-path routes: { '/x.mpd': { body, type } }
   } = options;
 
   const payload = makePayload(size, seed);
@@ -44,6 +45,17 @@ export async function startTestServer(options = {}) {
   const server = createServer(async (req, res) => {
     requests += 1;
     hits.push({ method: req.method, url: req.url, range: req.headers.range || null });
+
+    const extra = routes[req.url];
+    if (extra) {
+      const body = Buffer.isBuffer(extra.body) ? extra.body : Buffer.from(String(extra.body));
+      res.writeHead(extra.status ?? 200, {
+        'content-type': extra.type || 'application/octet-stream',
+        'content-length': body.length,
+      });
+      if (req.method === 'HEAD') return res.end();
+      return res.end(body);
+    }
 
     if (req.url === '/redirect') {
       res.writeHead(302, { location: '/file' });
@@ -97,11 +109,17 @@ export async function startTestServer(options = {}) {
     if (req.url === '/manifest.mpd') {
       res.writeHead(200, { 'content-type': 'application/dash+xml' });
       res.end(
-        '<MPD><Period><AdaptationSet mimeType="video/mp4"><Representation id="v0" bandwidth="900000" width="640" height="360">' +
-          '<BaseURL>v0.mp4</BaseURL></Representation><Representation id="v1" bandwidth="3000000" width="1920" height="1080">' +
-          '<BaseURL>v1.mp4</BaseURL></Representation></AdaptationSet></Period></MPD>',
+        '<MPD mediaPresentationDuration="PT8S"><Period duration="PT8S"><AdaptationSet mimeType="video/mp4" contentType="video">' +
+          '<Representation id="v0" bandwidth="900000" width="640" height="360"><BaseURL>v0.mp4</BaseURL></Representation>' +
+          '<Representation id="v1" bandwidth="3000000" width="1920" height="1080"><BaseURL>v1.mp4</BaseURL></Representation>' +
+          '</AdaptationSet></Period></MPD>',
       );
       return;
+    }
+    if (req.url === '/v0.mp4' || req.url === '/v1.mp4') {
+      const body = Buffer.from(String(req.url).repeat(64));
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': body.length });
+      return res.end(body);
     }
     if (req.url === '/flaky' && req.method === 'HEAD') {
       res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': size, 'accept-ranges': 'none' });

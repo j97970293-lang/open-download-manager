@@ -91,11 +91,11 @@ const TOOLS = [
   {
     name: 'download_hls',
     description:
-      'Concatenate an HLS media playlist (or a master playlist — the best variant is chosen) into ONE file on disk, resumably. Refuses encrypted/DRM playlists.',
+      'Concatenate a streaming manifest — HLS (.m3u8, master or media playlist) or DASH (.mpd, SegmentTemplate/SegmentTimeline/SegmentList) — into ONE file on disk, resumably. Picks the best variant under max_height. Refuses encrypted/DRM content.',
     inputSchema: {
       type: 'object',
       properties: {
-        url: { type: 'string', description: 'm3u8 URL (master or media playlist)' },
+        url: { type: 'string', description: 'Manifest URL: .m3u8 (HLS) or .mpd (DASH)' },
         dir: { type: 'string' },
         filename: { type: 'string' },
         max_height: { type: 'integer', description: 'Cap resolution when picking a variant' },
