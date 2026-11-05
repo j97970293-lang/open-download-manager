@@ -8,6 +8,9 @@
 
 export { DownloadTask, STATUS } from './downloader.js';
 export { ManifestDownload, MANIFEST_STATUS, loadManifestState } from './manifest-download.js';
+export { TorrentDownload, TORRENT_STATUS, parseTorrent, parseMagnet, announce } from './torrent.js';
+export { planDash, expandTimeline, describeDash } from './dash.js';
+export { encode as bencodeEncode, decode as bencodeDecode } from './bencode.js';
 export { JobStore, atomicWrite } from './store.js';
 export { QueueManager } from './queue.js';
 export { Scheduler, ScheduleWindow } from './scheduler.js';

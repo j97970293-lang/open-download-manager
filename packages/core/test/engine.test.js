@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 
-import { startTestServer } from './harness.js';
+import { startTestServer, makePayload } from './harness.js';
 import {
   DownloadTask,
   JobStore,
@@ -29,6 +29,9 @@ import {
   withDiskTimeout,
 } from '../src/index.js';
 import { planDash, expandTimeline } from '../src/dash.js';
+import { TorrentDownload, TORRENT_STATUS, parseTorrent, parseMagnet } from '../src/torrent.js';
+import { encode as bencodeEncode, decode as bencodeDecode } from '../src/bencode.js';
+import { startSeeder } from './seeder.js';
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const tmp = () => mkdtemp(join(tmpdir(), 'odm-'));
@@ -554,6 +557,132 @@ test('DASH: a DRM-protected manifest is refused, not downloaded', async () => {
     assert.match(snap.error.message, /DRM/i);
   } finally {
     await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+
+// ---------------------------------------------------------------- BitTorrent
+
+function makeTorrent(payload, { pieceLength = 16 * 1024, name = 'payload.bin' } = {}) {
+  const hashes = [];
+  for (let o = 0; o < payload.length; o += pieceLength) {
+    hashes.push(createHash('sha1').update(payload.subarray(o, Math.min(o + pieceLength, payload.length))).digest());
+  }
+  const buf = bencodeEncode({
+    announce: 'http://127.0.0.1:9/announce',
+    info: { name, 'piece length': pieceLength, length: payload.length, pieces: Buffer.concat(hashes) },
+  });
+  return { buf, meta: parseTorrent(buf) };
+}
+
+test('bencode round-trips dictionaries, lists and binary strings with sorted keys', () => {
+  const value = { b: 1, a: Buffer.from([0, 255, 7]), c: [1, 'two', { d: 3 }] };
+  const encoded = bencodeEncode(value);
+  assert.equal(encoded.toString('latin1'), 'd1:a3:' + String.fromCharCode(0, 255, 7) + '1:bi1e1:cli1e3:twod1:di3eeee');
+  const back = bencodeDecode(encoded);
+  assert.equal(back.b, 1);
+  assert.deepEqual([...back.a], [0, 255, 7]);
+  assert.equal(back.c[2].d, 3);
+});
+
+test('.torrent metainfo parses into a piece-hashed plan', () => {
+  const payload = makePayload(40 * 1024, 7);
+  const { meta } = makeTorrent(payload, { pieceLength: 16 * 1024 });
+  assert.equal(meta.total, 40 * 1024);
+  assert.equal(meta.pieceHashes.length, 3);
+  assert.equal(meta.infoHash.length, 20);
+  assert.equal(meta.files[0].path, 'payload.bin');
+});
+
+test('magnet URIs expose the info hash (hex and base32)', () => {
+  const hashHex = 'c12fe1c06bba254a9dc9f519b335aa7c1367a88a';
+  const hex = parseMagnet(`magnet:?xt=urn:btih:${hashHex}&dn=My+File&tr=http%3A%2F%2Ft.test%2Fa`);
+  assert.equal(hex.infoHash.toString('hex'), hashHex);
+  assert.equal(hex.name, 'My File');
+  assert.deepEqual(hex.trackers, ['http://t.test/a']);
+  const b32 = parseMagnet('magnet:?xt=urn:btih:YEX6DQDLXISUVHOJ6UM3GNNKPQJWPKEK');
+  assert.equal(b32.infoHash.length, 20);
+});
+
+test('BitTorrent: pieces are downloaded, SHA-1 verified and written at the right offsets', async () => {
+  const payload = makePayload(48 * 1024, 11);
+  const pieceLength = 16 * 1024;
+  const { meta } = makeTorrent(payload, { pieceLength });
+  const seeder = await startSeeder({ payload, pieceLength, infoHash: meta.infoHash });
+  const dir = await tmp();
+  try {
+    const task = new TorrentDownload({ url: 'inline', dir, meta: { ...meta, trackers: [] } });
+    task.peers = [seeder.peer];
+    const snap = await task.start();
+    assert.equal(snap.status, TORRENT_STATUS.COMPLETE, JSON.stringify(snap.error));
+    assert.equal(snap.downloaded, payload.length);
+    const written = await readFile(join(dir, 'payload.bin'));
+    assert.equal(written.length, payload.length);
+    assert.ok(written.equals(payload), 'file must be byte-identical to the torrent payload');
+    assert.equal(seeder.served.requests, 3, 'one request per piece, nothing re-fetched');
+  } finally {
+    await seeder.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('BitTorrent: a piece that fails SHA-1 is retried a bounded number of times, then reported', async () => {
+  const payload = makePayload(32 * 1024, 13);
+  const pieceLength = 16 * 1024;
+  const { meta } = makeTorrent(payload, { pieceLength });
+  const corrupted = Buffer.from(payload);
+  corrupted[64] ^= 0xff;
+  const seeder = await startSeeder({ payload: corrupted, pieceLength, infoHash: meta.infoHash });
+  const dir = await tmp();
+  try {
+    const task = new TorrentDownload({ url: 'inline', dir, meta: { ...meta, trackers: [] } });
+    task.peers = [seeder.peer];
+    const notices = [];
+    task.on('notice', (n) => notices.push(n.message));
+    const snap = await task.start();
+    assert.equal(snap.status, TORRENT_STATUS.ERROR);
+    assert.match(snap.error.message, /corrupt/i);
+    assert.ok(notices.filter((m) => m.includes('SHA-1')).length <= 4, `retries must be bounded, got ${notices.length}`);
+  } finally {
+    await seeder.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('BitTorrent: verified pieces already on disk are not downloaded again', async () => {
+  const payload = makePayload(32 * 1024, 17);
+  const pieceLength = 16 * 1024;
+  const { meta } = makeTorrent(payload, { pieceLength });
+  const seeder = await startSeeder({ payload, pieceLength, infoHash: meta.infoHash });
+  const dir = await tmp();
+  try {
+    await writeFile(join(dir, 'payload.bin'), payload.subarray(0, pieceLength));
+    const task = new TorrentDownload({ url: 'inline', dir, meta: { ...meta, trackers: [] } });
+    task.peers = [seeder.peer];
+    const snap = await task.start();
+    assert.equal(snap.status, TORRENT_STATUS.COMPLETE, JSON.stringify(snap.error));
+    assert.equal(seeder.served.requests, 1, 'only the missing piece is requested');
+    assert.ok((await readFile(join(dir, 'payload.bin'))).equals(payload));
+  } finally {
+    await seeder.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('BitTorrent: a peer serving a different info hash is rejected', async () => {
+  const mine = makeTorrent(makePayload(16 * 1024, 19), { pieceLength: 16 * 1024 });
+  const other = makeTorrent(makePayload(16 * 1024, 23), { pieceLength: 16 * 1024 });
+  const seeder = await startSeeder({ payload: Buffer.alloc(16 * 1024), pieceLength: 16 * 1024, infoHash: other.meta.infoHash });
+  const dir = await tmp();
+  try {
+    const task = new TorrentDownload({ url: 'inline', dir, meta: { ...mine.meta, trackers: [] } });
+    task.peers = [seeder.peer];
+    const snap = await task.start();
+    assert.equal(snap.status, TORRENT_STATUS.ERROR);
+    assert.equal(seeder.served.requests, 0, 'no bytes accepted from the wrong swarm');
+  } finally {
+    await seeder.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
   }
 });

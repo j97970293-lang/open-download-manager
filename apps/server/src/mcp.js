@@ -15,6 +15,7 @@ import {
   JobStore,
   QueueManager,
   ManifestDownload,
+  TorrentDownload,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -103,6 +104,20 @@ const TOOLS = [
         wait: { type: 'boolean', description: 'Block until the stream is written' },
       },
       required: ['url'],
+    },
+  },
+  {
+    name: 'download_torrent',
+    description:
+      'Download a .torrent file (local path or http(s) URL) or a magnet link. Leeches only — never uploads. Pieces are SHA-1 verified; verified pieces already on disk are reused.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', description: 'Path or URL of a .torrent, or a magnet: URI (magnet support needs trackers that return peers)' },
+        dir: { type: 'string' },
+        wait: { type: 'boolean', description: 'Block until every piece is written' },
+      },
+      required: ['source'],
     },
   },
   {
@@ -261,6 +276,22 @@ async function callTool(ctx, name, args) {
         segments: snap.segments,
         completed_segments: snap.completedSegments,
         bytes_written: snap.bytesWritten,
+        error: snap.error?.message ?? null,
+      };
+    }
+    case 'download_torrent': {
+      const job = new TorrentDownload({ url: args.source, dir: args.dir || join(process.env.HOME || '.', 'Downloads') });
+      const done = job.start();
+      if (args.wait) await done;
+      const snap = args.wait ? await done : job.snapshot();
+      return {
+        id: snap.id,
+        status: snap.status,
+        name: snap.name,
+        size: snap.size,
+        downloaded: snap.downloaded,
+        peers: snap.peers,
+        files: snap.files,
         error: snap.error?.message ?? null,
       };
     }

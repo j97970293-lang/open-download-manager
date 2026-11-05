@@ -6,7 +6,7 @@
 
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -178,6 +178,39 @@ console.log('\n6. DASH concatenation (CLI)');
   const { readdir } = await import('node:fs/promises');
   const files = await readdir(dashDir);
   files.some((f) => f.endsWith('.mp4')) ? ok(`DASH representation saved as ${files.find((f) => f.endsWith('.mp4'))}`) : bad(`no DASH output: ${files}`);
+}
+
+console.log('\n7. BitTorrent (local seeder)');
+{
+  const btDir = join(home, 'bt');
+  await mkdir(btDir, { recursive: true });
+  // Serve a .torrent + tracker + seeder from this very process: no external swarm.
+  const { startSeeder } = await import('../packages/core/test/seeder.js');
+  const { encode } = await import('../packages/core/src/bencode.js');
+  const payload = Buffer.alloc(128 * 1024);
+  for (let i = 0; i < payload.length; i += 1) payload[i] = (i * 53 + 3) & 0xff;
+  const pieceLength = 32 * 1024;
+  const pieces = [];
+  for (let o = 0; o < payload.length; o += pieceLength) {
+    pieces.push(createHash('sha1').update(payload.subarray(o, Math.min(o + pieceLength, payload.length))).digest());
+  }
+  const info = { name: 'smoke-torrent.bin', 'piece length': pieceLength, length: payload.length, pieces: Buffer.concat(pieces) };
+  const infoHash = createHash('sha1').update(encode(info)).digest();
+  const seeder = await startSeeder({ payload, pieceLength, infoHash });
+  const torrentPath = join(btDir, 'smoke.torrent');
+  await writeFile(torrentPath, encode({ announce: 'http://127.0.0.1:1/announce', info }));
+
+  // Point the client at the seeder: patch the tracker lookup by passing peers directly.
+  const { TorrentDownload } = await import('../packages/core/src/index.js');
+  const dl = new TorrentDownload({ url: torrentPath, dir: join(btDir, 'out') });
+  dl.peers = [seeder.peer];
+  const snap = await dl.start();
+  snap.status === 'complete' ? ok(`torrent completed: ${snap.downloaded} bytes in ${snap.files.length} file`) : bad(`torrent status ${snap.status}: ${snap.error?.message}`);
+  if (snap.status === 'complete') {
+    const got = await readFile(join(btDir, 'out', 'smoke-torrent.bin'));
+    got.equals(payload) ? ok('torrent payload is byte-identical (SHA-1 verified)') : bad('torrent payload mismatch');
+  }
+  await seeder.close();
 }
 
 await srv.close();

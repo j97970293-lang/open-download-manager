@@ -6,6 +6,8 @@
  */
 
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
+import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +16,8 @@ import {
   QueueManager,
   DownloadTask,
   ManifestDownload,
+  TorrentDownload,
+  bencodeEncode,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -46,6 +50,7 @@ export async function createApp({ stateDir, downloadDir } = {}) {
   for (const task of store.list()) task.on('done', () => queue.tick());
 
   const manifestJobs = new Map();
+  const torrentJobs = new Map();
   const sseClients = new Set();
   const broadcast = (event, data) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -103,7 +108,11 @@ export async function createApp({ stateDir, downloadDir } = {}) {
 
     if (path === '/api/downloads' && method === 'GET') {
       return json(res, 200, {
-        downloads: [...store.list().map((t) => t.snapshot()), ...[...manifestJobs.values()].map((j) => j.snapshot())],
+        downloads: [
+          ...store.list().map((t) => t.snapshot()),
+          ...[...manifestJobs.values()].map((j) => j.snapshot()),
+          ...[...torrentJobs.values()].map((j) => j.snapshot()),
+        ],
         queue: { maxConcurrent: queue.concurrency, paused: queue.paused, globalRate: queue.globalLimiter.rate },
       });
     }
@@ -132,6 +141,18 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       const created = [];
       const streams = [];
       for (const u of urls) {
+        if (body.kind === 'torrent' || /^magnet:/i.test(u) || /\.torrent(\?|$)/i.test(u)) {
+          const job = new TorrentDownload({ url: u, dir: body.dir || downloadDir });
+          torrentJobs.set(job.id, job);
+          job.on('progress', (snap) => broadcast('progress', { ...snap, kind: 'torrent' }));
+          job.on('status', (status, snap) => broadcast('status', { status, ...snap }));
+          job.on('done', (snap) => broadcast('done', snap));
+          job.on('failed', (err, snap) => broadcast('failed', { ...snap, error: err }));
+          job.on('notice', (n) => broadcast('notice', n));
+          streams.push(job);
+          created.push(job.snapshot());
+          continue;
+        }
         if (body.kind === 'hls' || /\.m3u8(\?|$)/i.test(u) || /\.mpd(\?|$)/i.test(u)) {
           const job = createStream({
             url: u,
@@ -172,6 +193,29 @@ export async function createApp({ stateDir, downloadDir } = {}) {
     const idMatch = /^\/api\/downloads\/([^/]+)(?:\/(pause|resume|cancel|limit))?$/.exec(path);
     if (idMatch) {
       const [, id, action] = idMatch;
+      const torrent = torrentJobs.get(id);
+      if (torrent) {
+        if (method === 'GET') return json(res, 200, torrent.snapshot());
+        if (method === 'DELETE') {
+          torrent.pause();
+          torrentJobs.delete(id);
+          return json(res, 200, { removed: id });
+        }
+        if (method === 'POST' && action === 'pause') {
+          torrent.pause();
+          return json(res, 200, torrent.snapshot());
+        }
+        if (method === 'POST' && action === 'resume') {
+          torrent.start().catch(() => {});
+          return json(res, 200, torrent.snapshot());
+        }
+        if (method === 'POST' && action === 'cancel') {
+          torrent.pause();
+          torrentJobs.delete(id);
+          return json(res, 200, { canceled: id });
+        }
+        return json(res, 405, { error: 'method not allowed' });
+      }
       const stream = manifestJobs.get(id);
       if (stream) {
         if (method === 'GET') return json(res, 200, stream.snapshot());
@@ -384,6 +428,39 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       return setTimeout(() => res.end(part), 40);
     }
 
+    // ---- a real .torrent for the demo, with a local seeder on the same port ----
+    if (process.env.ODM_DEMO === '1' && path === '/demo/files.torrent') {
+      const payload = Buffer.alloc(256 * 1024);
+      for (let i = 0; i < payload.length; i += 1) payload[i] = (i * 37 + 11) & 0xff;
+      const pieceLength = 64 * 1024;
+      const pieces = [];
+      for (let o = 0; o < payload.length; o += pieceLength) {
+        pieces.push(createHash('sha1').update(payload.subarray(o, Math.min(o + pieceLength, payload.length))).digest());
+      }
+      const info = { name: 'demo-samples.bin', 'piece length': pieceLength, length: payload.length, pieces: Buffer.concat(pieces) };
+      const infoHash = createHash('sha1').update(bencodeEncode(info)).digest();
+      startDemoSeeder({ payload, pieceLength, infoHash });
+      const body = bencodeEncode({
+        announce: `${originOf(req)}/demo/announce`,
+        'announce-list': [[`${originOf(req)}/demo/announce`]],
+        info,
+      });
+      res.writeHead(200, { 'content-type': 'application/x-bittorrent', 'content-length': body.length });
+      return res.end(body);
+    }
+
+    if (process.env.ODM_DEMO === '1' && path === '/demo/announce') {
+      // A real tracker response (BEP 3, compact peer list) pointing at our seeder.
+      // The seeder listens on an ephemeral port; report wherever it actually landed.
+      const seeder = demoSeeder;
+      const peerBytes = Buffer.from(
+        seeder && seeder.port ? [...seeder.ip.split('.').map(Number), seeder.port >> 8, seeder.port & 0xff] : [],
+      );
+      const body = bencodeEncode({ interval: 60, complete: 1, incomplete: 0, peers: peerBytes });
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-length': body.length });
+      return res.end(body);
+    }
+
     // ---- DASH ladder (SegmentTemplate + SegmentTimeline, the on-demand form) ----
     if (process.env.ODM_DEMO === '1' && path === '/demo/manifest.mpd') {
       const mpd =
@@ -486,6 +563,66 @@ export async function createApp({ stateDir, downloadDir } = {}) {
   });
 
   return { server, store, queue, sseClients };
+}
+
+/** Minimal leech-side seeder for the demo: serves one torrent over the wire protocol. */
+let demoSeeder = null;
+function startDemoSeeder({ payload, pieceLength, infoHash }) {
+  if (demoSeeder?.infoHash?.equals(infoHash)) return demoSeeder;
+  const sockets = new Set();
+  const tcp = createTcpServer((sock) => {
+    sockets.add(sock);
+    let buf = Buffer.alloc(0);
+    let handshaken = false;
+    sock.on('error', () => {});
+    sock.on('close', () => sockets.delete(sock));
+    sock.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (!handshaken) {
+        if (buf.length < 68) return;
+        handshaken = true;
+        const theirHash = buf.subarray(28, 48);
+        buf = buf.subarray(68);
+        if (!theirHash.equals(infoHash)) return sock.destroy();
+        const hs = Buffer.alloc(68);
+        hs.writeUInt8(19, 0);
+        hs.write('BitTorrent protocol', 1, 'ascii');
+        infoHash.copy(hs, 28);
+        Buffer.from('-DEMO01-' + '0'.repeat(12)).copy(hs, 48);
+        sock.write(hs);
+        sock.write(Buffer.from([0, 0, 0, 1, 1])); // unchoke
+      }
+      while (buf.length >= 4) {
+        const len = buf.readUInt32BE(0);
+        if (buf.length < 4 + len) return;
+        const msg = buf.subarray(4, 4 + len);
+        buf = buf.subarray(4 + len);
+        if (!len || msg[0] !== 6) continue;
+        const index = msg.readUInt32BE(1);
+        const begin = msg.readUInt32BE(5);
+        const length = msg.readUInt32BE(9);
+        const start = index * pieceLength + begin;
+        const block = payload.subarray(start, Math.min(start + length, payload.length));
+        const head = Buffer.alloc(13);
+        head.writeUInt32BE(9 + block.length, 0);
+        head.writeUInt8(7, 4);
+        head.writeUInt32BE(index, 5);
+        head.writeUInt32BE(begin, 9);
+        sock.write(Buffer.concat([head, block]));
+      }
+    });
+  });
+  const entry = {
+    infoHash,
+    port: 0,
+    ip: process.env.ODM_DEMO_PEER_IP || '127.0.0.1',
+    close: () => new Promise((r) => { for (const s of sockets) s.destroy(); tcp.close(r); }),
+  };
+  tcp.listen(0, '0.0.0.0', () => {
+    entry.port = tcp.address().port;
+  });
+  demoSeeder = entry;
+  return demoSeeder;
 }
 
 export async function startServer({ port = 8420, host = '0.0.0.0', stateDir, downloadDir } = {}) {

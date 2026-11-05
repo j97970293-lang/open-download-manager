@@ -9,6 +9,7 @@
  *   odm grab <pageUrl> [--pick 1]       discover media on a page
  *   odm manifest <m3u8|mpd> [--max-height 720]
  *   odm probe <url>                      show what a server supports
+ *   odm torrent <file.torrent|magnet:?…> [--dir .]   BitTorrent (leech-only)
  *   odm mcp                              run the MCP server on stdio
  */
 
@@ -21,6 +22,7 @@ import {
   QueueManager,
   DownloadTask,
   ManifestDownload,
+  TorrentDownload,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -252,6 +254,34 @@ async function cmdHls(args, values) {
   return 0;
 }
 
+async function cmdTorrent(args, values) {
+  const { config } = await boot();
+  const [target] = args;
+  if (!target) throw new Error('usage: odm torrent <file.torrent|https://…/*.torrent|magnet:?xt=urn:btih:…>');
+  const dir = resolve(values.dir || config.dir || '.');
+  await mkdir(dir, { recursive: true });
+  const job = new TorrentDownload({ url: /^magnet:/i.test(target) ? target : resolve(target), dir });
+  if (!values.quiet && !values.json) {
+    job.on('progress', (snap) => {
+      process.stdout.write(
+        `\r  ${bar(snap.progress)} ${(snap.progress * 100).toFixed(1).padStart(5)}%  ${snap.peers ?? 0} peers  ${formatBytes(snap.downloaded)}  `,
+      );
+    });
+    job.on('notice', (n) => {
+      if (values.verbose) process.stderr.write(`\n  ! ${n.message}\n`);
+    });
+  }
+  const snap = await job.start();
+  if (!values.quiet && !values.json) process.stdout.write('\n');
+  if (values.json) console.log(JSON.stringify(snap, null, 2));
+  if (snap.status !== 'complete') {
+    console.error(red(`torrent failed: ${snap.error?.message || snap.status}`));
+    return 1;
+  }
+  console.log(`${green('✓')} ${snap.name}  ${formatBytes(snap.downloaded)} in ${snap.files.length} file(s)`);
+  return 0;
+}
+
 async function cmdManifest(args, values) {
   const [url] = args;
   if (!url) throw new Error('usage: odm manifest <m3u8|mpd>');
@@ -376,6 +406,9 @@ async function main() {
     case 'hls':
     case 'stream':
       return cmdHls(positionals, values2);
+    case 'torrent':
+    case 'bt':
+      return cmdTorrent(positionals, values2);
     case 'mcp': {
       const { startMcpServer } = await import('../../server/src/mcp.js');
       await startMcpServer();
@@ -408,6 +441,7 @@ ${bold('Commands')}
   grab <pageUrl>          discover media links on a page
   hls <m3u8-url>          concatenate an HLS stream into one file
   manifest <url>          inspect HLS/DASH manifests
+  torrent <src>           download a .torrent or magnet link (leech-only)
   probe <url>             report size, ranges, etag
   serve [--port 8420]     REST API + web dashboard
   mcp                     Model Context Protocol server (stdio)

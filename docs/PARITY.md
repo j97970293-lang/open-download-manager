@@ -57,7 +57,7 @@ That filter list is the clearest public statement of the product's **domain**: H
 | DASH (`mpd`, incl. `3gpp.mpd`, `audio/vnd.mpeg.dash.mpd`) | ✅ full support: MPD parsing, representation ranking **and** segment expansion (SegmentTemplate `$Number$`/`$Time$`, SegmentTimeline with `@r`, SegmentList, BaseURL) concatenated into one file — `src/dash.js` |
 | In-page media (`video`, `audio`, `og:video`) | ✅ `odm grab` / `POST /api/grab` |
 | `file://`, `content://` | ➖ meaningless outside Android |
-| `magnet:` / BitTorrent | ❌ not implemented (separate protocol stack) |
+| `magnet:` / BitTorrent | ✅ leech-only client (`src/torrent.js`): .torrent + magnet (via `ut_metadata`), HTTP trackers, BEP 3 wire protocol, SHA-1 per piece, resume. No DHT/PEX/uTP, never seeds |
 
 ## Feature parity matrix
 
@@ -68,6 +68,7 @@ Legend: ✅ implemented · ⚠️ partial / different mechanism · ❌ intention
 | Feature | Reference | Here | Notes |
 | --- | --- | --- | --- |
 | Multi-connection split download | ✅ | ✅ | test 4: 8 ranged requests, byte-identical output |
+| BitTorrent (the reference ships libtorrent 1.2.19 + ffmpeg) | ✅ | ⚠️ leech-only subset | handshake, bitfield/have, request/piece, SHA-1, resume; peers from HTTP(S) trackers only — no DHT, no PEX, no seeding, no uTP. 6 tests plus a smoke section drive a real seeder |
 | Configurable connections | ✅ | ✅ | 1–32, default 8 |
 | Resume after app kill | ✅ | ✅ | test 7: new `JobStore` resumes to completion |
 | Resume after network drop | ✅ | ✅ | test 9: 2 forced connection drops → complete |
@@ -103,7 +104,7 @@ Legend: ✅ implemented · ⚠️ partial / different mechanism · ❌ intention
 | Encrypted playlist refusal | ✅ | ✅ | `#EXT-X-KEY:METHOD` → error, never bypassed |
 | Encrypted / DRM detection | ✅ | ✅ detect-and-refuse | no circumvention, ever |
 | Segment remux to a single file | ✅ | ✅ | HLS **and** DASH: segments concatenated in order into one `.ts`/fMP4/`.mp4` file with per-segment resume (`ManifestDownload`); the init segment is written exactly once (regression test asserts the output is byte-for-byte the sum of its parts) |
-| BitTorrent / magnet | ✅ | ❌ | separate protocol stack |
+| BitTorrent / magnet | ✅ | ⚠️ | leech-only: .torrent + magnet (`ut_metadata`), HTTP(S) trackers, SHA-1 per piece, resume from verified pieces. Not implemented: DHT, PEX, uTP, seeding, WebTorrent |
 
 ### Platform
 
