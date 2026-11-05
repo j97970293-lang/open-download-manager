@@ -100,8 +100,9 @@ Legend: ✅ implemented · ⚠️ partial / different mechanism · ❌ intention
 | HLS parsing + quality choice | ✅ | ✅ | master/media playlists, `RESOLUTION`, `BANDWIDTH` |
 | DASH parsing + quality choice | ✅ | ✅ | `AdaptationSet`/`Representation`, `BaseURL` |
 | Live stream detection | ✅ | ✅ | `#EXT-X-ENDLIST` absence |
+| Encrypted playlist refusal | ✅ | ✅ | `#EXT-X-KEY:METHOD` → error, never bypassed |
 | Encrypted / DRM detection | ✅ | ✅ detect-and-refuse | no circumvention, ever |
-| Segment remux to a single file | ✅ | ❌ | roadmap; variants are queued as direct streams |
+| Segment remux to a single file | ✅ | ✅ | HLS: segments concatenated in order into one `.ts`/fMP4 file with per-segment resume (`ManifestDownload`); DASH: variants listed and fetched as direct streams |
 | BitTorrent / magnet | ✅ | ❌ | separate protocol stack |
 
 ### Platform

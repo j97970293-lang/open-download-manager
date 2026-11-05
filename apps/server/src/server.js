@@ -13,6 +13,7 @@ import {
   JobStore,
   QueueManager,
   DownloadTask,
+  ManifestDownload,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -44,6 +45,7 @@ export async function createApp({ stateDir, downloadDir } = {}) {
   const queue = new QueueManager(store, { maxConcurrent: 3 });
   for (const task of store.list()) task.on('done', () => queue.tick());
 
+  const manifestJobs = new Map();
   const sseClients = new Set();
   const broadcast = (event, data) => {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -101,7 +103,7 @@ export async function createApp({ stateDir, downloadDir } = {}) {
 
     if (path === '/api/downloads' && method === 'GET') {
       return json(res, 200, {
-        downloads: store.list().map((t) => t.snapshot()),
+        downloads: [...store.list().map((t) => t.snapshot()), ...[...manifestJobs.values()].map((j) => j.snapshot())],
         queue: { maxConcurrent: queue.concurrency, paused: queue.paused, globalRate: queue.globalLimiter.rate },
       });
     }
@@ -111,7 +113,25 @@ export async function createApp({ stateDir, downloadDir } = {}) {
       const urls = Array.isArray(body.urls) ? body.urls : body.url ? [body.url] : [];
       if (!urls.length) return json(res, 400, { error: 'url or urls[] is required' });
       const created = [];
+      const streams = [];
       for (const u of urls) {
+        if (body.kind === 'hls' || /\.m3u8(\?|$)/i.test(u)) {
+          const job = new ManifestDownload({
+            url: u,
+            dir: body.dir || downloadDir,
+            maxHeight: body.maxHeight || Infinity,
+            parallel: Number(body.connections ?? 3),
+            limit: body.limit ? parseSize(body.limit) : 0,
+          });
+          manifestJobs.set(job.id, job);
+          job.on('progress', (snap) => broadcast('progress', snap));
+          job.on('status', (status, snap) => broadcast('status', { status, ...snap }));
+          job.on('done', (snap) => broadcast('done', snap));
+          job.on('failed', (err, snap) => broadcast('failed', { ...snap, error: err }));
+          streams.push(job);
+          created.push(job.snapshot());
+          continue;
+        }
         const task = store.add({
           url: u,
           dir: body.dir || downloadDir || join(process.env.HOME || '.', 'Downloads'),
@@ -131,6 +151,7 @@ export async function createApp({ stateDir, downloadDir } = {}) {
         task.on('failed', (err, s) => broadcast('failed', { ...s, error: err }));
         created.push(task.snapshot());
       }
+      for (const job of streams) job.start().catch(() => {});
       queue.tick();
       return json(res, 201, { created });
     }
@@ -138,6 +159,29 @@ export async function createApp({ stateDir, downloadDir } = {}) {
     const idMatch = /^\/api\/downloads\/([^/]+)(?:\/(pause|resume|cancel|limit))?$/.exec(path);
     if (idMatch) {
       const [, id, action] = idMatch;
+      const stream = manifestJobs.get(id);
+      if (stream) {
+        if (method === 'GET') return json(res, 200, stream.snapshot());
+        if (method === 'DELETE') {
+          stream.pause();
+          manifestJobs.delete(id);
+          return json(res, 200, { removed: id });
+        }
+        if (method === 'POST' && action === 'pause') {
+          stream.pause();
+          return json(res, 200, stream.snapshot());
+        }
+        if (method === 'POST' && action === 'resume') {
+          stream.resume();
+          return json(res, 200, stream.snapshot());
+        }
+        if (method === 'POST' && action === 'cancel') {
+          stream.pause();
+          manifestJobs.delete(id);
+          return json(res, 200, { canceled: id });
+        }
+        return json(res, 405, { error: 'method not allowed' });
+      }
       const task = store.get(id);
       if (!task) return json(res, 404, { error: 'not found' });
       if (method === 'GET' && !action) return json(res, 200, task.snapshot());

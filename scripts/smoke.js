@@ -148,6 +148,26 @@ console.log('\n4. MCP server (stdio JSON-RPC)');
   child.kill();
 }
 
+console.log('\n5. HLS concatenation (CLI)');
+{
+  const hlsDir = join(home, 'hls');
+  await mkdir(hlsDir, { recursive: true });
+  const res = await run(process.execPath, [CLI, 'hls', srv.url('/hls/master.m3u8'), '-d', hlsDir, '--max-height', '720', '-q'], { env }).catch((e) => ({ stdout: e.stdout || '', stderr: e.stderr || '' }));
+  const { stdout } = res;
+  if (res.stderr) console.log('   stderr:', res.stderr.trim());
+  if (stdout.includes('segments')) ok(`odm hls wrote one file: ${stdout.trim()}`);
+  else bad(`odm hls output: ${stdout}`);
+  const { readdir } = await import('node:fs/promises');
+  const files = await readdir(hlsDir);
+  const ts = files.find((f) => f.endsWith('.ts'));
+  ts ? ok(`playlist concatenated to ${ts}`) : bad(`no .ts output: ${files}`);
+  if (ts) {
+    const body = await readFile(join(hlsDir, ts), 'utf8');
+    const ordered = body.indexOf('SEGMENT-high-0-') < body.indexOf('SEGMENT-high-4-');
+    body.includes('SEGMENT-high-4-') && ordered ? ok('segments written in order') : bad('segment order wrong');
+  }
+}
+
 await srv.close();
 await rm(home, { recursive: true, force: true });
 console.log(process.exitCode ? '\n\x1b[31mSMOKE FAILED\x1b[0m\n' : '\n\x1b[32mSMOKE PASSED\x1b[0m\n');

@@ -67,6 +67,33 @@ export async function startTestServer(options = {}) {
       );
       return;
     }
+    if (req.url === '/hls/master.m3u8') {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360\n/hls/low/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\n/hls/high/index.m3u8\n');
+      return;
+    }
+    if (req.url === '/hls/high/index.m3u8' || req.url === '/hls/low/index.m3u8') {
+      const n = req.url.includes('/low/') ? 2 : 5;
+      const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:4', '#EXT-X-PLAYLIST-TYPE:VOD'];
+      for (let i = 0; i < n; i += 1) lines.push('#EXTINF:4.0,', `/hls/${req.url.includes('/low/') ? 'low' : 'high'}/seg${i}.ts`);
+      lines.push('#EXT-X-ENDLIST');
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end(lines.join('\n'));
+      return;
+    }
+    if (req.url.startsWith('/hls/high/seg') || req.url.startsWith('/hls/low/seg')) {
+      const name = req.url.split('/').pop().replace('.ts', '');
+      const idx = Number(name.replace('seg', ''));
+      const body = Buffer.from(`SEGMENT-${req.url.includes('/low/') ? 'low' : 'high'}-${idx}-` + 'x'.repeat(1000 + idx * 7));
+      res.writeHead(200, { 'content-type': 'video/mp2t', 'content-length': body.length });
+      res.end(body);
+      return;
+    }
+    if (req.url === '/hls/drm/index.m3u8') {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:4,\nseg0.ts\n#EXT-X-ENDLIST\n');
+      return;
+    }
     if (req.url === '/manifest.mpd') {
       res.writeHead(200, { 'content-type': 'application/dash+xml' });
       res.end(

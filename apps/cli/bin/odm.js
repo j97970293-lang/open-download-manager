@@ -20,6 +20,7 @@ import {
   JobStore,
   QueueManager,
   DownloadTask,
+  ManifestDownload,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -217,6 +218,40 @@ async function cmdGrab(args, values) {
   return 0;
 }
 
+/** Concatenate an HLS playlist into one file (resumable), then report. */
+async function cmdHls(args, values) {
+  const { config } = await boot();
+  const [url] = args;
+  if (!url) throw new Error('usage: odm hls <m3u8-url>');
+  const dir = resolve(values.dir || config.dir || '.');
+  await mkdir(dir, { recursive: true });
+  const job = new ManifestDownload({
+    url,
+    dir,
+    filename: values.output,
+    maxHeight: Number(values.maxHeight || Infinity),
+    parallel: Number(values.connections || 3),
+    limit: values.limit ? parseSize(values.limit) : 0,
+    headers: values.header ? Object.fromEntries(values.header.map((h) => h.split(/:\s*/, 2))) : {},
+  });
+  if (!values.quiet && !values.json) {
+    job.on('progress', (snap) => {
+      process.stdout.write(
+        `\r  ${bar(snap.progress)} ${(snap.progress * 100).toFixed(1).padStart(5)}%  segment ${snap.completedSegments}/${snap.segments}  ${formatBytes(snap.bytesWritten)}  ${formatBytes(snap.speed)}/s   `,
+      );
+    });
+  }
+  const snap = await job.start();
+  if (!values.quiet && !values.json) process.stdout.write('\n');
+  if (values.json) console.log(JSON.stringify(snap, null, 2));
+  if (snap.status !== 'complete') {
+    console.error(red(`stream failed: ${snap.error?.message || snap.status}`));
+    return 1;
+  }
+  console.log(`${green('✓')} ${snap.path}  ${formatBytes(snap.bytesWritten)} (${snap.segments} segments)`);
+  return 0;
+}
+
 async function cmdManifest(args, values) {
   const [url] = args;
   if (!url) throw new Error('usage: odm manifest <m3u8|mpd>');
@@ -227,7 +262,7 @@ async function cmdManifest(args, values) {
       console.log(`  ${cyan(v.resolution || '?')} ${formatBytes(v.bandwidth)}/s ${dim(v.codecs || '')} ${v.url}`);
     }
     const chosen = pickVariant(manifest.variants, { maxHeight: Number(values.maxHeight || Infinity) });
-    if (values.download && chosen) return cmdAdd([chosen.url], values);
+    if (values.download && chosen) return cmdHls([chosen.url], values);
   } else {
     console.log(bold(`DASH`) + (manifest.drm ? red(' (protected content — not supported)') : ''));
     for (const set of manifest.sets) {
@@ -327,6 +362,9 @@ async function main() {
       return cmdGrab(positionals, values2);
     case 'manifest':
       return cmdManifest(positionals, values2);
+    case 'hls':
+    case 'stream':
+      return cmdHls(positionals, values2);
     case 'mcp': {
       const { startMcpServer } = await import('../../server/src/mcp.js');
       await startMcpServer();
@@ -357,6 +395,7 @@ ${bold('Commands')}
   pause|resume <id|all>   control transfers
   rm <id|all> [--delete]  remove (optionally delete the file)
   grab <pageUrl>          discover media links on a page
+  hls <m3u8-url>          concatenate an HLS stream into one file
   manifest <url>          inspect HLS/DASH manifests
   probe <url>             report size, ranges, etag
   serve [--port 8420]     REST API + web dashboard
@@ -376,6 +415,7 @@ ${bold('Download options')}
 ${dim('Examples')}
   odm add https://example.com/big.iso -c 16 -l 5MB
   odm grab https://example.com/watch --pick 2
+  odm hls https://cdn.example/master.m3u8 --max-height 720
   odm manifest https://cdn.example/master.m3u8 --max-height 720 --download
 `);
       return command ? 1 : 0;

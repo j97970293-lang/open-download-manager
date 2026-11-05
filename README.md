@@ -68,6 +68,7 @@ node apps/cli/bin/odm.js serve --port 8420
 | **Queue** | Priority bands, FIFO inside a band, global concurrency cap, pause-all |
 | **Scheduling** | Daily `HH:MM-HH:MM` windows (crossing midnight supported) for off-peak runs |
 | **Media grabber** | HTML scan (`<video>`, `<source>`, `og:video`, links, inline scripts) + HLS master playlists + DASH MPD variant ranking |
+| **HLS concatenation** | Media playlist → **one file**, segments written in order with per-segment resume; master playlists pick the best variant; encrypted playlists refused |
 | **Agent access** | MCP server (stdio JSON-RPC 2.0) exposing 7 tools, 2 resources and 1 prompt |
 | **UI** | Server-rendered shell + SSE live stream, one card per transfer with per-connection segments |
 
@@ -112,6 +113,7 @@ odm watch [id]              live progress
 odm pause|resume <id|all>   control transfers
 odm rm <id|all> [--delete]  remove (optionally delete the file)
 odm grab <pageUrl>          discover media links on a page
+odm hls <m3u8-url>          concatenate an HLS stream into one file
 odm manifest <url>          inspect HLS/DASH manifests
 odm probe <url>             report size, ranges, etag, filename
 odm serve [--port 8420]     REST API + web dashboard
@@ -147,6 +149,7 @@ $ odm probe https://proof.ovh.net/files/100Mb.dat
 | `POST` | `/api/grab` | media discovery on a page |
 | `POST` | `/api/manifest` | HLS/DASH variants |
 | `GET` | `/api/events` | **SSE**: `hello`, `progress`, `status`, `done`, `failed` |
+| `POST` | `/api/downloads` with `{kind:"hls"}` | concatenate an HLS playlist into one file |
 
 ## Agent access (MCP)
 
@@ -183,14 +186,18 @@ ok 11 404 surfaces a non-retryable HttpError
 ok 12 queue respects priority order and concurrency cap
 ok 13 media grabber finds video sources in HTML
 ok 14 HLS and DASH manifests parse and rank variants
-# pass 15  # fail 0
+ok 15 HLS playlist is concatenated into one file, in order
+ok 16 encrypted HLS playlist is refused
+...
+# pass 17  # fail 0
 ```
 
 `npm run smoke` then exercises the real stack: CLI download + checksum, probe/grab/manifest, REST + SSE, and MCP `initialize` → `tools/list` → `tools/call` → completed download.
 
 ## Known limits
 
-- HLS/DASH manifests are parsed and their variants **listed and queued as direct streams**; segment-by-segment remuxing into a single container is not implemented yet (the manifest is preserved and the selected variant is queued).
+- HLS is fully concatenated (`.ts` parts in order, or fMP4 when the playlist carries an init segment). DASH is parsed and its representations are fetched as direct streams — no MPD segment-template assembly yet.
+- Audio and video tracks in separate adaptation sets are not merged (no muxing/remux step).
 - No browser extension yet (the API is ready for it: one `POST /api/downloads`).
 - No Android client yet — the engine assumes a Node host.
 - `DRM`-protected manifests are detected and refused by design.

@@ -72,6 +72,7 @@ function hostOf(url) {
 }
 
 function renderJob(snap) {
+  if (snap.kind === 'manifest') return renderStream(snap);
   let li = $(`[data-id="${CSS.escape(snap.id)}"]`);
   if (!li) {
     li = template.content.firstElementChild.cloneNode(true);
@@ -139,6 +140,67 @@ function renderJob(snap) {
     }
   };
 
+  li.hidden = !matchesFilter(snap);
+}
+
+function renderStream(snap) {
+  let li = $(`[data-id="${CSS.escape(snap.id)}"]`);
+  if (!li) {
+    li = template.content.firstElementChild.cloneNode(true);
+    li.dataset.id = snap.id;
+    li.classList.add('stream');
+    $('#jobs').append(li);
+  }
+  li.dataset.status = snap.status;
+  $('.job-name', li).textContent = snap.filename || 'HLS stream';
+  $('.job-name', li).title = snap.playlistUrl || snap.url;
+  const pill = $('.status-pill', li);
+  pill.dataset.s = snap.status;
+  pill.textContent = snap.status === 'downloading' ? 'streaming' : snap.status;
+  $('.host', li).textContent = (() => {
+    try { return 'HLS · ' + new URL(snap.playlistUrl || snap.url).host.replace(/^www\./, ''); } catch { return 'HLS'; }
+  })();
+  $('.dims', li).textContent = `${snap.completedSegments}/${snap.segments} segments · ${
+    (snap.filename || '').endsWith('.mp4') ? 'fMP4' : 'MPEG-TS'
+  }`;
+
+  // one cell per segment for playlists up to 120 parts, then a single aggregate bar
+  const bar = $('.segbar', li);
+  const cells = snap.segments <= 120 ? snap.segments : 1;
+  if (bar.children.length !== cells) {
+    bar.replaceChildren(...Array.from({ length: cells }, () => {
+      const seg = document.createElement('span');
+      seg.className = 'seg';
+      seg.append(document.createElement('i'));
+      return seg;
+    }));
+  }
+  const doneCount = snap.status === 'complete' ? snap.segments : snap.completedSegments;
+  [...bar.children].forEach((el, i) => {
+    const p = cells === 1 ? snap.progress : (i < doneCount ? 1 : i === doneCount ? 0.4 : 0);
+    $('i', el).style.width = `${p * 100}%`;
+    el.classList.toggle('active', i === doneCount && snap.status === 'downloading');
+  });
+
+  $('.pct', li).textContent = `${(snap.progress * 100).toFixed(0)}%`;
+  $('.amounts', li).textContent = `${fmtBytes(snap.bytesWritten)} written`;
+  $('.speed', li).textContent = snap.speed ? `${fmtBytes(snap.speed)}/s` : '';
+  $('.eta', li).textContent = snap.error?.message || '';
+
+  const toggle = $('.act-toggle', li);
+  toggle.hidden = snap.status === 'complete';
+  toggle.onclick = async () => {
+    const action = snap.status === 'downloading' ? 'pause' : 'resume';
+    try { await api(`/api/downloads/${snap.id}/${action}`, { method: 'POST' }); } catch (e) { toast(e.message, 'err'); }
+  };
+  $('.act-remove', li).onclick = async () => {
+    try {
+      await api(`/api/downloads/${snap.id}`, { method: 'DELETE' });
+      li.remove();
+      state.downloads.delete(snap.id);
+      updateSummary();
+    } catch (e) { toast(e.message, 'err'); }
+  };
   li.hidden = !matchesFilter(snap);
 }
 

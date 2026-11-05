@@ -23,6 +23,8 @@ import {
   parseChecksum,
   probeUrl,
   TokenBucket,
+  ManifestDownload,
+  MANIFEST_STATUS,
 } from '../src/index.js';
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -310,4 +312,40 @@ test('HLS and DASH manifests parse and rank variants', () => {
   );
   assert.equal(mpd.sets[0].representations[0].height, 1080);
   assert.ok(!mpd.drm);
+});
+
+test('HLS playlist is concatenated into one file, in order', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({});
+  try {
+    const job = new ManifestDownload({ url: srv.url('/hls/master.m3u8'), dir, maxHeight: 720 });
+    const snap = await job.start();
+    assert.equal(snap.status, MANIFEST_STATUS.COMPLETE, JSON.stringify(snap.error));
+    assert.equal(snap.segments, 5, 'picks the 720p variant (5 segments)');
+    const data = (await readFile(join(dir, job.filename))).toString();
+    // every segment present, exactly once, in index order
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(data.split(`SEGMENT-high-${i}-`).length - 1, 1, `segment ${i} appears once`);
+    }
+    assert.ok(data.indexOf('SEGMENT-high-0-') < data.indexOf('SEGMENT-high-1-'));
+    assert.ok(data.indexOf('SEGMENT-high-3-') < data.indexOf('SEGMENT-high-4-'));
+    assert.ok(job.filename.endsWith('.ts'));
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('encrypted HLS playlist is refused', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({});
+  try {
+    const job = new ManifestDownload({ url: srv.url('/hls/drm/index.m3u8'), dir });
+    const snap = await job.start();
+    assert.equal(snap.status, MANIFEST_STATUS.ERROR);
+    assert.match(snap.error.message, /encrypted|DRM/i);
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
 });

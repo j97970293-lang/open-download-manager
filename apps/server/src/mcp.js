@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import {
   JobStore,
   QueueManager,
+  ManifestDownload,
   STATUS,
   probeUrl,
   extractMediaFromHtml,
@@ -83,6 +84,23 @@ const TOOLS = [
         url: { type: 'string' },
         max_height: { type: 'integer', description: 'Cap resolution, e.g. 720' },
         download: { type: 'boolean', description: 'Queue the selected variant' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'download_hls',
+    description:
+      'Concatenate an HLS media playlist (or a master playlist — the best variant is chosen) into ONE file on disk, resumably. Refuses encrypted/DRM playlists.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'm3u8 URL (master or media playlist)' },
+        dir: { type: 'string' },
+        filename: { type: 'string' },
+        max_height: { type: 'integer', description: 'Cap resolution when picking a variant' },
+        parallel: { type: 'integer', minimum: 1, maximum: 8, default: 3 },
+        wait: { type: 'boolean', description: 'Block until the stream is written' },
       },
       required: ['url'],
     },
@@ -223,6 +241,28 @@ async function callTool(ctx, name, args) {
         queued = task.snapshot().id;
       }
       return { kind: manifest.kind, type: manifest.type, best, queued };
+    }
+    case 'download_hls': {
+      const job = new ManifestDownload({
+        url: args.url,
+        dir: args.dir || join(process.env.HOME || '.', 'Downloads'),
+        filename: args.filename,
+        maxHeight: args.max_height || Infinity,
+        parallel: Number(args.parallel ?? 3),
+      });
+      const done = job.start();
+      if (args.wait) await done;
+      const snap = args.wait ? await done : job.snapshot();
+      return {
+        id: snap.id,
+        status: snap.status,
+        filename: snap.filename,
+        path: snap.path,
+        segments: snap.segments,
+        completed_segments: snap.completedSegments,
+        bytes_written: snap.bytesWritten,
+        error: snap.error?.message ?? null,
+      };
     }
     case 'queue_set': {
       if (args.max_concurrent) queue.setMaxConcurrent(args.max_concurrent);
