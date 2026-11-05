@@ -73,14 +73,30 @@ un seul accent, échelle typographique réelle, espacement sur grille de 4 px, a
 
 | Destination | Contenu |
 | --- | --- |
-| GitHub `j97970293-lang/open-download-manager` | le livrable (branche `main`, commit `e3bf22d`) |
+| GitHub `j97970293-lang/open-download-manager` | le livrable — `main` @ `f79a5f7`, release `v1.0.0` avec asset |
 | GitHub `j97970293-lang/rea-mirror` | miroir complet de `morluto/rea` (branches + 40 tags) |
 | GitHub `j97970293-lang/awesome-ai-tools-for-ui` | miroir de `maxbogo/awesome-ai-tools-for-ui` |
+| GitHub Release `v1.0.0` | `open-download-manager-1.0.0.tar.gz` (asset, 2 450 678 o) — [lien](https://github.com/j97970293-lang/open-download-manager/releases/tag/v1.0.0) |
 | Google Drive → `Open Download Manager/` | archives, captures, rapport, paquet Craft Anything |
 
-## 4. Limites connues (honnêtes)
+## 4. Mise à jour post-livraison (commit `f79a5f7`)
 
-- HLS/DASH : variantes listées et téléchargées en flux direct ; pas encore de remux segment→conteneur unique.
+**HLS concaténé ajouté** — la limite signalée en v1.0.0 est levée :
+
+- nouveau module `packages/core/src/manifest-download.js` : master → meilleure variante → segments écrits
+  **en ordre** dans un seul fichier (`.ts`, ou fMP4 si la playlist porte un segment d'init), reprise au
+  couple (index de segment, offset), refus des playlists chiffrées (`#EXT-X-KEY`), lecture anticipée bornée.
+- CLI : `odm hls <m3u8>` (progression segment par segment, `--max-height`, `-c` pour la parallélisation).
+- API : `POST /api/downloads {"kind":"hls"}` + pause/resume/delete sur `/api/downloads/:id/*`.
+- MCP : outil `download_hls` (9 outils au total).
+- Dashboard : les flux s'affichent avec une cellule par segment.
+
+Vérifié : **17/17 tests** (`HLS playlist is concatenated into one file, in order`, `encrypted HLS playlist is refused`)
+et `npm run smoke` couvre désormais le chemin HLS complet (`odm hls → index.ts, 5 segments, ordre correct`).
+
+## 5. Limites connues (honnêtes)
+
+- DASH : variantes listées et récupérées en flux direct ; pas encore d'assemblage des segment-templates MPD.
 - Pas d'extension navigateur ni de client Android (l'API REST est prête pour les deux).
 - Les flux DRM/chiffrés sont détectés et refusés par construction.
 - `npm start` sert le dashboard local ; l'aperçu hébergé de l'environnement peut demander `ODM_DEMO=1` pour le bouton de démo.
