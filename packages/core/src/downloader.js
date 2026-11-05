@@ -11,13 +11,15 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { join } from 'node:path';
-import { stat, unlink } from 'node:fs/promises';
-import { createSegments, TargetFile, SEGMENT_STATE, totalRemaining, isComplete } from './segments.js';
-import { streamRange, probeUrl } from './net.js';
+import { basename, join } from 'node:path';
+import { mkdir, open, unlink } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
+import { createSegments, TargetFile, SEGMENT_STATE, totalRemaining, isComplete, uniquePath, assertResumable, withDiskTimeout } from './segments.js';
+import { streamRange, probeUrl, stripCredentials } from './net.js';
 import { RateLimiter } from './rate.js';
 import {
   AbortError,
+  DiskError,
   ChecksumError,
   HttpError,
   NetworkError,
@@ -50,7 +52,7 @@ const PAUSABLE = new Set([STATUS.QUEUED, STATUS.CONNECTING, STATUS.DOWNLOADING])
 export class DownloadTask extends EventEmitter {
   constructor(options = {}) {
     super();
-    const {
+    let {
       url,
       dir = process.cwd(),
       filename,
@@ -62,14 +64,17 @@ export class DownloadTask extends EventEmitter {
       store = null,
       globalLimiter = null,
       maxRetries = 6,
+      diskTimeoutMs = 30_000,
       speedSamples = 6,
       now = () => Date.now(),
     } = options;
 
     if (!url) throw new Error('DownloadTask requires a url');
     this.id = options.id || makeId();
-    this.url = url;
-    this.finalUrl = options.finalUrl || url;
+    const stripped = stripCredentials(url);
+    this.url = stripped.url;
+    if (stripped.authorization) headers = { ...headers, authorization: stripped.authorization };
+    this.finalUrl = options.finalUrl ? stripCredentials(options.finalUrl).url : stripped.url;
     this.dir = dir;
     this.filename = sanitizeFilename(filename || filenameFromUrl(url));
     this.connections = Math.max(1, Math.min(32, connections));
@@ -79,6 +84,7 @@ export class DownloadTask extends EventEmitter {
     this.store = store;
     this.globalLimiter = globalLimiter;
     this.maxRetries = maxRetries;
+    this.diskTimeoutMs = diskTimeoutMs;
     this.now = now;
 
     this.size = options.size ?? null;
@@ -100,6 +106,8 @@ export class DownloadTask extends EventEmitter {
     this.speedWindow = [];
     this.windowSize = speedSamples;
     this.file = null;
+    this.pathOverride = options.pathOverride ?? null;
+    if (this.pathOverride) this.filename = basename(this.pathOverride);
     this.controller = null;
     this.active = 0;
     this.progressTimer = null;
@@ -110,7 +118,7 @@ export class DownloadTask extends EventEmitter {
   }
 
   get path() {
-    return join(this.dir, this.filename);
+    return this.pathOverride || join(this.dir, this.filename);
   }
 
   get downloaded() {
@@ -181,6 +189,7 @@ export class DownloadTask extends EventEmitter {
     return {
       ...this.snapshot(),
       headers: this.headers,
+      pathOverride: this.pathOverride,
       acceptRanges: this.acceptRanges,
       lastModified: this.lastModified,
       checksum: this.checksum,
@@ -217,8 +226,12 @@ export class DownloadTask extends EventEmitter {
     if (this.speedWindow.length > this.windowSize * 2) this.speedWindow.shift();
   }
 
-  async #resolveInfo(signal) {
+  async #resolveInfo(signal, { enforceIdentity = false } = {}) {
     const info = await probeUrl(this.url, { headers: this.headers, signal });
+    if (enforceIdentity && this.segments.length && this.segments.some((s) => s.cursor > s.start)) {
+      // We already have bytes on disk: the remote must still be the same resource.
+      assertResumable(this, { size: info.size, etag: info.etag });
+    }
     this.finalUrl = info.finalUrl;
     this.size = info.size;
     this.etag = info.etag;
@@ -239,6 +252,13 @@ export class DownloadTask extends EventEmitter {
 
   /** Download the whole body in one stream (no ranges available). */
   async #singleStream(signal) {
+    if (!this.pathOverride) {
+      this.pathOverride = await uniquePath(this.dir, this.filename, { owned: this.totalBytes > 0 });
+      if (basename(this.pathOverride) !== this.filename) {
+        this.filename = basename(this.pathOverride);
+        this.emit('notice', { message: `Destination exists — saving as ${this.filename}` });
+      }
+    }
     const file = new TargetFile(this.path, null);
     await file.open();
     let position = 0;
@@ -364,20 +384,55 @@ export class DownloadTask extends EventEmitter {
     return this.runPromise;
   }
 
+  /** Fail fast when the destination cannot hold files at all (dead mount, read-only fs). */
+  async #assertDestinationWritable() {
+    const probePath = join(this.dir, `.odm-write-test-${process.pid}-${Date.now()}`);
+    try {
+      await withDiskTimeout(() => mkdir(this.dir, { recursive: true }), {
+        ms: this.diskTimeoutMs,
+        what: 'Destination unusable',
+        path: this.dir,
+      });
+      const fh = await withDiskTimeout(() => open(probePath, 'w'), {
+        ms: this.diskTimeoutMs,
+        what: 'Destination not writable',
+        path: this.dir,
+      });
+      await fh.close();
+      await unlink(probePath).catch(() => {});
+    } catch (err) {
+      // Already typed (timeout / allocation) → keep the precise code and message.
+      const wrapped = err instanceof DiskError || err.name === 'DiskError' ? err : new DiskError(`Destination unusable: ${err.message}`, { path: this.dir });
+      this.error = { message: wrapped.message, code: wrapped.code ?? 'DISK_ERROR', retryable: false };
+      throw wrapped;
+    }
+  }
+
   async #run(signal) {
     this.active = 0;
     this.speedWindow = [];
     this.#setStatus(STATUS.CONNECTING);
     this.startedAt ??= this.now();
     try {
+      await this.#assertDestinationWritable();
       if (!this.size || this.acceptRanges === null) {
-        await this.#resolveInfo(signal);
+        await this.#resolveInfo(signal, { enforceIdentity: true });
         this.#persist(true);
       }
       if (this.status === STATUS.COMPLETE) return this.snapshot();
       if (await this.#checkExisting()) {
         this.#setStatus(STATUS.COMPLETE, { completedAt: this.now() });
         return this.snapshot();
+      }
+
+      // Never write over an unrelated file: pick "name (1).ext" when the target exists.
+      if (!this.pathOverride) {
+        const owned = this.segments.some((s) => s.cursor > s.start) || this.totalBytes > 0;
+        this.pathOverride = await uniquePath(this.dir, this.filename, { owned });
+        if (basename(this.pathOverride) !== this.filename) {
+          this.filename = basename(this.pathOverride);
+          this.emit('notice', { message: `Destination exists — saving as ${this.filename}` });
+        }
       }
 
       this.progressTimer = setInterval(() => this.#emitProgress(), 250);
@@ -396,8 +451,14 @@ export class DownloadTask extends EventEmitter {
       } else {
         if (!this.segments.length || this.segments.at(-1).end !== this.size - 1) {
           this.segments = createSegments(this.size, this.connections);
+        } else if (this.segments.some((s) => s.cursor > s.start)) {
+          // Resuming with bytes on disk: the remote must still be the same resource,
+          // otherwise we would splice two versions of a file together.
+          const fresh = await probeUrl(this.finalUrl, { headers: this.headers, signal });
+          assertResumable(this, fresh);
         }
         this.file = new TargetFile(this.path, this.size);
+        this.file.diskTimeoutMs = this.diskTimeoutMs;
         await this.file.open();
         // Bounded worker pool over the segment list.
         const queue = [...this.segments];

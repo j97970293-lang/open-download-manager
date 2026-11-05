@@ -11,6 +11,27 @@ export const DEFAULT_HEADERS = {
   'cache-control': 'no-cache',
 };
 
+/**
+ * `fetch` rejects URLs that embed credentials ("http://user:pass@host").
+ * Split them out and turn them into a Basic Authorization header instead.
+ */
+export function stripCredentials(url) {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return { url, authorization: null };
+    const user = decodeURIComponent(parsed.username);
+    const pass = decodeURIComponent(parsed.password);
+    parsed.username = '';
+    parsed.password = '';
+    return {
+      url: parsed.toString(),
+      authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`,
+    };
+  } catch {
+    return { url, authorization: null };
+  }
+}
+
 export function mergeHeaders(...sets) {
   const out = { ...DEFAULT_HEADERS };
   for (const set of sets) {
@@ -36,8 +57,9 @@ export function parseContentRange(value) {
  * Uses HEAD first (cheap); falls back to a 1-byte ranged GET for servers that
  * reject HEAD or omit Content-Length. Never downloads the whole body.
  */
-export async function probeUrl(url, { headers, signal, timeout = 20_000, redirect = 'follow' } = {}) {
-  const baseHeaders = mergeHeaders(headers);
+export async function probeUrl(rawUrl, { headers, signal, timeout = 20_000, redirect = 'follow' } = {}) {
+  const { url, authorization } = stripCredentials(rawUrl);
+  const baseHeaders = mergeHeaders(authorization ? { ...headers, authorization } : headers);
   const withTimeout = (signal) => {
     if (typeof AbortSignal.timeout !== 'function') return signal;
     const t = AbortSignal.timeout(timeout);
@@ -108,14 +130,16 @@ export async function probeUrl(url, { headers, signal, timeout = 20_000, redirec
  * Stream one byte range into an async iterator of Buffer chunks, with retry on
  * transient failures. Validates the server actually honoured the range.
  */
-export async function* streamRange(url, { start, end, headers, signal, retries = 4, onRetry } = {}) {
+export async function* streamRange(rawUrl, { start, end, headers, signal, retries = 4, onRetry } = {}) {
+  const { url, authorization } = stripCredentials(rawUrl);
+  const requestHeadersBase = authorization ? { ...headers, authorization } : headers;
   let attempt = 0;
   let cursor = start;
   for (;;) {
     attempt += 1;
     try {
       const requestHeaders = {
-        ...mergeHeaders(headers),
+        ...mergeHeaders(requestHeadersBase),
         range: `bytes=${cursor}-${end}`,
       };
       const res = await fetch(url, { headers: requestHeaders, redirect: 'follow', signal });

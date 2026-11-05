@@ -20,6 +20,8 @@ export {
   isComplete,
   assertResumable,
   SEGMENT_STATE,
+  withDiskTimeout,
+  uniquePath,
 } from './segments.js';
 export { probeUrl, streamRange, parseContentRange, mergeHeaders, DEFAULT_HEADERS } from './net.js';
 export { hashFile, parseChecksum, sniffFile, CHECKSUM_ALGOS } from './checksum.js';

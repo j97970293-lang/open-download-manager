@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -25,6 +26,7 @@ import {
   TokenBucket,
   ManifestDownload,
   MANIFEST_STATUS,
+  withDiskTimeout,
 } from '../src/index.js';
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -348,4 +350,117 @@ test('encrypted HLS playlist is refused', async () => {
     await srv.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
   }
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Regression suite for defects found by the static audits (REA 6.8.0 /
+   Craft Anything 0.2.0). Each test below failed before its fix.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+test('resume refuses a resource whose ETag changed (no spliced files)', async () => {
+  const dir = await tmp();
+  let payload = Buffer.alloc(256 * 1024, 1);
+  let etag = '"v1"';
+  const server = createServer(async (req, res) => {
+    const range = req.headers.range;
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-length': payload.length, 'accept-ranges': 'bytes', etag, 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="drift.bin"' });
+      return res.end();
+    }
+    const m = /bytes=(\d+)-(\d*)/.exec(range || 'bytes=0-');
+    const start = Number(m[1]);
+    const end = m[2] ? Math.min(Number(m[2]), payload.length - 1) : payload.length - 1;
+    res.writeHead(range ? 206 : 200, {
+      'content-length': end - start + 1,
+      'content-range': `bytes ${start}-${end}/${payload.length}`,
+      'accept-ranges': 'bytes',
+      etag,
+      'content-disposition': 'attachment; filename="drift.bin"',
+    });
+    let cursor = start;
+    while (cursor <= end) {
+      const next = Math.min(cursor + 8192, end + 1);
+      if (!res.write(payload.subarray(cursor, next))) await new Promise((r) => res.once('drain', r));
+      cursor = next;
+      await new Promise((r) => setTimeout(r, 1));
+      if (res.destroyed) return;
+    }
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}/drift.bin`;
+  try {
+    const task = new DownloadTask({ url, dir, connections: 2 });
+    const run = task.start();
+    while (task.downloaded < 64 * 1024) await new Promise((r) => setTimeout(r, 5));
+    task.pause();
+    await run;
+    payload = Buffer.alloc(256 * 1024, 9);
+    etag = '"v2"';
+    const snap = await task.resume();
+    assert.equal(snap.status, STATUS.ERROR);
+    assert.equal(snap.error.code, 'RESUME_MISMATCH');
+  } finally {
+    await new Promise((r) => server.close(r));
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('a second download with the same name never overwrites the first', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({ size: 32 * 1024, filename: 'same.bin' });
+  try {
+    const a = new DownloadTask({ url: srv.url('/file'), dir, connections: 2 });
+    await a.start();
+    const b = new DownloadTask({ url: srv.url('/file'), dir, connections: 2 });
+    await b.start();
+    const names = await readdir(dir);
+    assert.equal(names.length, 2, names.join(', '));
+    assert.ok(names.includes('same.bin'));
+    assert.ok(names.some((n) => /same \(\d+\)\.bin/.test(n)), names.join(', '));
+    assert.notEqual(a.filename, b.filename);
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('credentials in the URL become an Authorization header', async () => {
+  const dir = await tmp();
+  const srv = await startTestServer({ size: 8 * 1024, auth: 'user:pass' });
+  try {
+    const ok = new DownloadTask({ url: srv.url('/auth/secret.bin').replace('http://', 'http://user:pass@'), dir });
+    const snap = await ok.start();
+    assert.equal(snap.status, STATUS.COMPLETE, JSON.stringify(snap.error));
+    assert.equal(ok.url.includes('user:pass'), false, 'credentials must not stay in the stored URL');
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('a destination that cannot hold files fails fast with DISK_ERROR', async () => {
+  const dir = await tmp();
+  const blocker = join(dir, 'not-a-directory');
+  await writeFile(blocker, 'x');
+  const srv = await startTestServer({ size: 4 * 1024 });
+  try {
+    // A regular file used as a parent folder: the very first write must fail loudly.
+    const task = new DownloadTask({ url: srv.url('/file'), dir: blocker, connections: 2, diskTimeoutMs: 3_000 });
+    const snap = await task.start();
+    assert.equal(snap.status, STATUS.ERROR);
+    assert.equal(snap.error.code, 'DISK_ERROR', snap.error.message);
+  } finally {
+    await srv.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 40 });
+  }
+});
+
+test('a filesystem call that never answers is abandoned, not awaited forever', async () => {
+  const started = Date.now();
+  await assert.rejects(
+    () => withDiskTimeout(() => new Promise(() => {}), { ms: 120, what: 'wedged mount' }),
+    (err) => err.code === 'DISK_ERROR' && /timed out/.test(err.message),
+  );
+  assert.ok(Date.now() - started < 2_000, `should give up quickly, took ${Date.now() - started}ms`);
 });

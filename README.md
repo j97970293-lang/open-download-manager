@@ -11,19 +11,21 @@
 <p align="center">
   <img alt="Node 20+" src="https://img.shields.io/badge/node-%E2%89%A520.11-339933?style=flat-square&logo=nodedotjs&logoColor=white">
   <img alt="Zero runtime dependencies" src="https://img.shields.io/badge/runtime%20deps-0-4ade80?style=flat-square">
-  <img alt="Tests: 15 passing" src="https://img.shields.io/badge/tests-15%20passing-4ade80?style=flat-square">
+  <img alt="Tests: 22 passing" src="https://img.shields.io/badge/tests-22%20passing-4ade80?style=flat-square">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f4c430?style=flat-square">
   <img alt="Status" src="https://img.shields.io/badge/status-working%20prototype-d69e2e?style=flat-square">
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="docs/AUDIT.md">Audit report</a> ·
   <a href="#what-it-does">What it does</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#cli">CLI</a> ·
   <a href="#agent-access-mcp">MCP</a> ·
   <a href="docs/PARITY.md">Parity report</a> ·
   <a href="docs/DESIGN.md">Design system</a> ·
+  <a href="docs/AUDIT.md">Audit</a> ·
   <a href="docs/LEGAL.md">Legal boundary</a>
 </p>
 
@@ -41,7 +43,7 @@ This project reimplements those ideas from the specifications, not from anyone's
 git clone https://github.com/j97970293-lang/open-download-manager
 cd open-download-manager
 
-npm test          # 15 engine tests (no network needed)
+npm test          # 22 engine tests (no network needed)
 npm run smoke     # end-to-end: CLI + REST + SSE + MCP against a local server
 npm start         # API + dashboard → http://localhost:8420
 ```
@@ -60,7 +62,9 @@ node apps/cli/bin/odm.js serve --port 8420
 | --- | --- |
 | **Segmented transfers** | Probes `Accept-Ranges`/`Content-Range`, splits the file into N contiguous windows, runs a bounded worker pool |
 | **Crash-safe resume** | Per-segment cursor persisted to disk (`jobs/<id>.json`) every 1.5 s; restart resumes from each cursor, not from zero |
-| **Server-drift detection** | Stores `ETag`/`Last-Modified`/size; refuses to resume onto a different resource (`RESUME_MISMATCH`) |
+| **Server-drift detection** | Re-probes the origin on resume; refuses to splice two versions together (`RESUME_MISMATCH`) — found missing by the audit, now enforced and tested |
+| **No silent overwrite** | Destination collisions become `name (1).ext`, announced and persisted |
+| **No hung tasks** | Every filesystem call has a deadline; an unusable destination fails in ms, not after a transfer |
 | **No-range fallback** | Falls back to a single stream with its own byte-offset checkpointing |
 | **Bandwidth shaping** | Token bucket per job **and** one global bucket shared by every connection |
 | **Retries** | Full-jitter exponential backoff; honours `Retry-After`; distinguishes retryable (`5xx`, `408`, `429`) from terminal (`404`, `403`) |
