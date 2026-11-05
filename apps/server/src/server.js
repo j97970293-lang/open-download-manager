@@ -346,7 +346,29 @@ export async function createApp({ stateDir, downloadDir } = {}) {
 
     if (process.env.ODM_DEMO === '1' && path === '/demo/master.m3u8') {
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
-      return res.end('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\n/demo/file?mb=8&name=480p.mp4\n#EXT-X-STREAM-INF:BANDWIDTH=3200000,RESOLUTION=1920x1080\n/demo/file?mb=20&name=1080p.mp4\n');
+      return res.end(
+        '#EXTM3U\n' +
+          '#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\n/demo/hls/480.m3u8\n' +
+          '#EXT-X-STREAM-INF:BANDWIDTH=3200000,RESOLUTION=1920x1080\n/demo/hls/1080.m3u8\n',
+      );
+    }
+
+    if (process.env.ODM_DEMO === '1' && /^\/demo\/hls\/(480|1080)\.m3u8$/.test(path)) {
+      const height = path.includes('1080') ? 1080 : 480;
+      const count = height === 1080 ? 12 : 6;
+      const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:4', '#EXT-X-PLAYLIST-TYPE:VOD'];
+      for (let i = 0; i < count; i += 1) lines.push('#EXTINF:4.0,', `/demo/hls/${height}-seg${i}.ts`);
+      lines.push('#EXT-X-ENDLIST');
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      return res.end(lines.join('\n'));
+    }
+
+    if (process.env.ODM_DEMO === '1' && /^\/demo\/hls\/\d+-seg\d+\.ts$/.test(path)) {
+      // ~380 KB per part so a 1080p ladder takes a few seconds to assemble.
+      const part = Buffer.alloc(380 * 1024, path.charCodeAt(path.length - 5) + path.length);
+      res.writeHead(200, { 'content-type': 'video/mp2t', 'content-length': part.length });
+      if (req.method === 'HEAD') return res.end();
+      return setTimeout(() => res.end(part), 40);
     }
 
     if (process.env.ODM_DEMO === '1' && path === '/demo/seed' && method === 'POST') {
